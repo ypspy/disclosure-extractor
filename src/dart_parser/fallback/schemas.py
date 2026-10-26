@@ -80,6 +80,18 @@ def found(
     return Item(status=ExtractionStatus.found, value=value, source=source, evidence=evidence)
 
 
+def item_missing() -> Item[None]:
+    return Item(status=ExtractionStatus.missing)
+
+
+def item_not_applicable() -> Item[None]:
+    return Item(status=ExtractionStatus.not_applicable)
+
+
+def item_not_in_regime() -> Item[None]:
+    return Item(status=ExtractionStatus.not_in_regime)
+
+
 class Period(BaseModel):
     start: str | None = None
     end: str | None = None
