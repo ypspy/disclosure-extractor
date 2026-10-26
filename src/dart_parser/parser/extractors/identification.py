@@ -21,7 +21,8 @@ _PERIOD_RE = re.compile(
     r".*?"
     r"(\d{4})[.\-]\s*(\d{1,2})[.\-]\s*(\d{1,2})"
 )
-_COMPANY_RE = re.compile(r"주식회사|㈜|.+주식회사")
+# html_to_text NFKC-normalizes U+321C ㈜ to "(주)" before this pattern runs.
+_COMPANY_RE = re.compile(r"주식회사|\(주\)|.+주식회사")
 
 
 @dataclass

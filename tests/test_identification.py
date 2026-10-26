@@ -1,4 +1,5 @@
 # tests/test_identification.py
+from dart_parser.fallback.schemas import ExtractionStatus
 from dart_parser.parser.context import ExtractionContext
 from dart_parser.parser.extractors.identification import extract_identification
 from dart_parser.parser.sections import locate_sections
@@ -26,3 +27,12 @@ def test_consolidated_title_sets_scope() -> None:
     html = "<p>연결감사보고서</p><p>제3기 2023.01.01부터 2023.12.31까지</p>"
     ctx = ExtractionContext(html=html, sections=locate_sections(html))
     assert extract_identification(ctx).fs_scope == "consolidated"
+
+
+def test_parenthesized_cieuc_company_prefix_is_found() -> None:
+    """U+321C ㈜ is NFKC-normalized to (주) before the company regex runs."""
+    html = "<p>㈜예시</p><p>감사보고서</p><p>제5기 2024.01.01부터 2024.12.31까지</p>"
+    ctx = ExtractionContext(html=html, sections=locate_sections(html))
+    result = extract_identification(ctx)
+    assert result.company_name.status is ExtractionStatus.found
+    assert result.company_name.value == "(주)예시"
