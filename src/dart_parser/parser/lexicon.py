@@ -6,6 +6,8 @@ Keys match `docs/standard-extraction-items.md`. Aliases are matched via
 
 from __future__ import annotations
 
+from dart_parser.parser.anchor_matcher import canonical
+
 ACCOUNT_ALIASES: dict[str, list[str]] = {
     "total_asset": ["자산총계"],
     "current_asset": ["유동자산"],
@@ -77,3 +79,19 @@ ACCOUNT_REJECT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "current_liability": ("비유동", "기타", "유동화"),
     "receivable": ("비유동", "장기"),
 }
+
+
+def account_label_rejected(key: str, label: str) -> bool:
+    """True when ``label`` contains a reject substring for ``key`` or for every key.
+
+    ``"*"`` applies before any alias match. Comparison uses ``canonical`` so spaces
+    and light punctuation do not hide a rejected token.
+    """
+    text = canonical(label)
+    if not text:
+        return False
+    needles = (
+        *ACCOUNT_REJECT_SUBSTRINGS.get("*", ()),
+        *ACCOUNT_REJECT_SUBSTRINGS.get(key, ()),
+    )
+    return any(token and canonical(token) in text for token in needles)
