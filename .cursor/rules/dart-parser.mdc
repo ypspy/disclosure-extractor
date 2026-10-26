@@ -1,0 +1,13 @@
+---
+description: DART hybrid parser engineering rules (normalize -> anchor rule engine -> SLM fallback)
+alwaysApply: true
+---
+
+- Follow `AGENTS.md` at the repository root; it is the source of truth for principles and conventions.
+- Never parse HTML styles. Flatten `colspan`/`rowspan` into a 2D grid before any table logic.
+- Prefer Open DART XBRL for financial statements; HTML parsing is the fallback.
+- Rule engine first; invoke the SLM fallback only when validation fails. Both outputs must conform to `src/dart_parser/fallback/schemas.py`.
+- All numeric cell conversions go through `to_number()`; all text comparisons go through `normalize_text()`.
+- Keep the three states apart: `missing` (failure), `not_applicable`, `not_in_regime`.
+- Add or update a pytest alongside every parser change, using mock HTML snippets.
+- Extraction item definitions live in `docs/standard-extraction-items.md`; do not invent new item keys without updating that document.
