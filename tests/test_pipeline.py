@@ -1,5 +1,9 @@
+from pathlib import Path
+
 from dart_parser.fallback.schemas import ExtractionStatus
 from dart_parser.pipeline import Pipeline
+
+SAMPLE_DIR = Path(__file__).parent / "sample_htmls"
 
 
 def test_run_from_html_returns_schema_and_tables(mock_bs_html: str) -> None:
@@ -22,3 +26,28 @@ def test_run_from_html_extracts_accounts_when_spec_matches(mock_bs_html: str) ->
     assert accounts.value.total_asset.current.value == 1200.0
     assert accounts.value.total_asset.current.unit_scale == 1_000_000
     assert accounts.value.total_asset.current.value_won == 1_200_000_000.0
+
+
+def test_run_from_html_fills_identification_before_accounts(mock_bs_html: str) -> None:
+    html = (
+        "<p>주식회사 예시</p><p>감사보고서</p>"
+        "<p>제5기 2024.01.01부터 2024.12.31까지</p>" + mock_bs_html
+    )
+    result = Pipeline().run_from_html(html, rcept_no="demo", use_fallback=False)
+    assert result.extraction.fs_scope == "separate"
+    assert result.extraction.company_name.value == "주식회사 예시"
+    assert result.extraction.accounts.status.value == "found"
+    assert result.extraction.subsidiary.subsidiary_status.value == "not_applicable"
+
+
+def test_run_from_html_smoke_on_standard_min() -> None:
+    html = (SAMPLE_DIR / "mock_standard_min.html").read_text(encoding="utf-8")
+    result = Pipeline().run_from_html(html, rcept_no="min", use_fallback=False)
+    ext = result.extraction
+    assert ext.fs_scope == "separate"
+    assert ext.accounts.status is not ExtractionStatus.missing
+    assert ext.opinion.status is not ExtractionStatus.missing
+    assert ext.hours.status is not ExtractionStatus.missing
+    assert ext.activities.status is ExtractionStatus.found
+    assert ext.communications.status is ExtractionStatus.found
+    assert result.validation.ok is True
