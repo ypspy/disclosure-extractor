@@ -89,6 +89,8 @@ def _window_end(
 
 
 def _section_key(text: str) -> str | None:
+    if "내부회계관리제도" in text and ("감사의견" in text or "검토의견" in text):
+        return "icfr_opinion"
     if "독립된 감사인의 감사보고서" in text:
         return "opinion_letter"
     if "감사 투입" in text or (_LEADING_NO["2"].match(text) and "시간" in text):
@@ -97,4 +99,14 @@ def _section_key(text: str) -> str | None:
         return "exhibit4_activities"
     if "커뮤니케이션" in text or _LEADING_NO["4"].match(text):
         return "exhibit4_communications"
+    if "재무상태표" in text:
+        return "bs"
+    if "손익계산서" in text:
+        return "is_"
+    if "강조사항" in text or "기타사항" in text or "계속기업" in text:
+        return "going_concern"
+    if "종속기업" in text:
+        return "subsidiaries"
+    if text == "주석" or text.startswith("주석"):
+        return "notes_toc"
     return None
