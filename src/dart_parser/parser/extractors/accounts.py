@@ -39,6 +39,7 @@ def extract_accounts(ctx: ExtractionContext) -> Item[Accounts]:
 
     A table with neither statement title is a candidate for both. When ``fs_scope``
     is consolidated, a table whose caption or preceding text contains ``연결`` wins.
+    Title checks use ``canonical``, so spaced headings such as ``재 무 상 태 표`` match.
     """
     if not ctx.tables:
         return item_missing()
@@ -82,10 +83,19 @@ def _candidate_tables(
     return _prefer_consolidated(pool, fs_scope)
 
 
+def _title_text(table: Table) -> str:
+    """Caption and preceding text, compared the same way as row labels."""
+    return canonical(f"{table.caption}\n{table.context_before}")
+
+
+def _title_contains(table: Table, *needles: str) -> bool:
+    text = _title_text(table)
+    return any(token and canonical(token) in text for token in needles)
+
+
 def _statement_kind(table: Table) -> str:
-    text = f"{table.caption}\n{table.context_before}"
-    has_is = "손익" in text
-    has_bs = "재무상태표" in text or "대차대조표" in text
+    has_is = _title_contains(table, "손익")
+    has_bs = _title_contains(table, "재무상태표", "대차대조표")
     if has_is and not has_bs:
         return "is"
     if has_bs and not has_is:
@@ -96,7 +106,7 @@ def _statement_kind(table: Table) -> str:
 def _prefer_consolidated(tables: list[Table], fs_scope: FsScope | None) -> list[Table]:
     if fs_scope != "consolidated":
         return tables
-    linked = [table for table in tables if "연결" in f"{table.caption}\n{table.context_before}"]
+    linked = [table for table in tables if _title_contains(table, "연결")]
     return linked or tables
 
 

@@ -88,6 +88,56 @@ def test_balance_sheet_fixture_amounts(mock_bs_html: str) -> None:
     assert item.value.total_equity.prior.value == 400.0
 
 
+# Spaced titles stay spaced after extract_tables. The income-statement grid also
+# has 자산총계, so only a balance-sheet classification keeps that 111 out of total_asset.
+SPACED_HTML = """
+<p>재 무 상 태 표</p>
+<p>(단위 : 백만원)</p>
+<table>
+  <tr><th>과목</th><th>제5기</th><th>제4기</th></tr>
+  <tr><td>자산총계</td><td>100</td><td>90</td></tr>
+</table>
+<p>(단위 : 백만원)</p>
+<table>
+  <caption>연 결 재 무 상 태 표</caption>
+  <tr><th>과목</th><th>제5기</th><th>제4기</th></tr>
+  <tr><td>자산총계</td><td>9,000</td><td>8,000</td></tr>
+</table>
+<p>손 익 계 산 서</p>
+<p>(단위 : 백만원)</p>
+<table>
+  <tr><th>과목</th><th>제5기</th><th>제4기</th></tr>
+  <tr><td>자산총계</td><td>111</td><td>110</td></tr>
+  <tr><td>매출액</td><td>3,000</td><td>2,500</td></tr>
+</table>
+"""
+
+
+def test_spaced_titles_classify_balance_sheet_and_prefer_consolidated() -> None:
+    tables = extract_tables(SPACED_HTML)
+    separate, consolidated, income = tables
+    assert "재 무 상 태 표" in separate.context_before
+    assert "재무상태표" not in separate.context_before
+    assert consolidated.caption == "연 결 재 무 상 태 표"
+    assert "연결" not in consolidated.caption
+    assert "손 익 계 산 서" in income.context_before
+    assert "손익" not in income.context_before
+
+    ctx = ExtractionContext(
+        html=SPACED_HTML,
+        tables=tables,
+        fs_scope="consolidated",
+    )
+    item = extract_accounts(ctx)
+    assert item.value is not None
+    assert item.value.total_asset is not None
+    assert item.value.total_asset.current is not None
+    assert item.value.total_asset.current.value == 9000.0
+    assert item.value.revenue is not None
+    assert item.value.revenue.current is not None
+    assert item.value.revenue.current.value == 3000.0
+
+
 def test_consolidated_scope_prefers_consolidated_caption() -> None:
     ctx = ExtractionContext(
         html=CONSOLIDATED_HTML,
