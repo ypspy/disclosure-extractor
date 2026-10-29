@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from dart_parser.config.settings import Settings, get_settings
 from dart_parser.fallback.llm_client import extract_with_slm
-from dart_parser.fallback.schemas import StandardExtraction, empty_standard
+from dart_parser.fallback.schemas import ExtractionStatus, StandardExtraction, empty_standard
 from dart_parser.normalizer.table_grid import Table, extract_tables
 from dart_parser.parser.context import CorpForm, ExtractionContext
 from dart_parser.parser.extractors.accounts import extract_accounts
@@ -20,7 +20,11 @@ from dart_parser.parser.extractors.notes_toc import extract_notes_toc
 from dart_parser.parser.extractors.opinion_letter import extract_opinion_letter
 from dart_parser.parser.extractors.subsidiary import extract_subsidiary
 from dart_parser.parser.sections import locate_sections
-from dart_parser.validator.math_validator import ValidationResult, validate_accounts
+from dart_parser.validator.math_validator import (
+    ValidationIssue,
+    ValidationResult,
+    validate_accounts,
+)
 
 
 @dataclass
@@ -110,12 +114,20 @@ def _apply_opinion(ctx: ExtractionContext, extraction: StandardExtraction) -> No
 
 
 def _validate(extraction: StandardExtraction) -> ValidationResult:
+    issues: list[ValidationIssue] = []
+    if extraction.accounts.status is ExtractionStatus.missing:
+        issues.append(
+            ValidationIssue(
+                code="accounts_missing",
+                message="연구 계정 13줄을 찾지 못함",
+            )
+        )
     accounts = validate_accounts(extraction.accounts.value)
+    issues.extend(accounts.issues)
     hours = (
         validate_hours(extraction.hours.value)
         if extraction.hours.value is not None
         else ValidationResult(ok=True)
     )
-    if accounts.ok and hours.ok:
-        return ValidationResult(ok=True)
-    return ValidationResult(ok=False, issues=[*accounts.issues, *hours.issues])
+    issues.extend(hours.issues)
+    return ValidationResult(ok=not issues, issues=issues)
