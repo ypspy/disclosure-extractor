@@ -17,7 +17,9 @@ from dart_parser.normalizer.table_grid import extract_tables
 from dart_parser.parser.context import ExtractionContext
 
 _ROUND_RE = re.compile(r"제?\s*(\d+)\s*회")
+_BARE_ROUND_RE = re.compile(r"^\s*(\d+)\s*$")
 _DATE_RE = re.compile(r"(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})")
+_KO_DATE_RE = re.compile(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 
 
 def extract_communications(ctx: ExtractionContext) -> Item[Communications]:
@@ -49,16 +51,12 @@ def _rounds(html: str) -> list[CommunicationItem]:
             if not row:
                 continue
             joined = " ".join(row)
-            if "회차" in joined and "일자" in joined:
+            if ("회차" in joined or "구분" in joined) and "일자" in joined:
                 continue
-            round_match = _ROUND_RE.search(joined)
+            round_match = _ROUND_RE.search(joined) or _BARE_ROUND_RE.match(row[0])
             if round_match is None:
                 continue
-            date_match = _DATE_RE.search(joined)
-            date = None
-            if date_match is not None:
-                year, month, day = date_match.groups()
-                date = f"{int(year):04d}.{int(month):02d}.{int(day):02d}"
+            date = _round_date(joined)
             items.append(
                 CommunicationItem(
                     round=int(round_match.group(1)),
@@ -67,3 +65,11 @@ def _rounds(html: str) -> list[CommunicationItem]:
                 )
             )
     return items
+
+
+def _round_date(joined: str) -> str | None:
+    date_match = _DATE_RE.search(joined) or _KO_DATE_RE.search(joined)
+    if date_match is None:
+        return None
+    year, month, day = date_match.groups()
+    return f"{int(year):04d}.{int(month):02d}.{int(day):02d}"

@@ -10,7 +10,7 @@ from rapidfuzz import fuzz
 
 from dart_parser.normalizer.cleaner import normalize_text
 
-_PUNCT_RE = re.compile(r"[\s\-_/·.,:;()\[\]{}'\"`~!@#$%^&*+=|\\<>?]+")
+_PUNCT_RE = re.compile(r"[\s\-_/·.,:;()\[\]{}'\"`~!@#$%^&*+=|\\<>?\u119e\u318d]+")
 
 
 @dataclass(frozen=True)

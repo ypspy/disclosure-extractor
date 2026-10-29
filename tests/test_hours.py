@@ -264,6 +264,90 @@ def test_nested_metric_headers_keep_the_lower_axis() -> None:
     assert validate_hours(item.value).ok is True
 
 
+TRANSPOSED_HTML = """
+<h3>2. 감사참여자 구분별 인원수 및 감사시간</h3>
+<table>
+  <tr>
+    <th>구분</th>
+    <th colspan="2">품질관리 검토자 (심리실 등)</th>
+    <th colspan="2">담당이사 (업무수행이사)</th>
+    <th colspan="2">등록 공인회계사</th>
+    <th colspan="2">수습 공인회계사</th>
+    <th colspan="2">전산감사ᆞ 세무ᆞ가치평가 등 전문가</th>
+    <th colspan="2">합계</th>
+  </tr>
+  <tr>
+    <th></th>
+    <th>당기</th><th>전기</th>
+    <th>당기</th><th>전기</th>
+    <th>당기</th><th>전기</th>
+    <th>당기</th><th>전기</th>
+    <th>당기</th><th>전기</th>
+    <th>당기</th><th>전기</th>
+  </tr>
+  <tr>
+    <td>투입 인원수</td>
+    <td>10</td><td>11</td>
+    <td>1</td><td>1</td>
+    <td>45</td><td>33</td>
+    <td>23</td><td>17</td>
+    <td>45</td><td>64</td>
+    <td>124</td><td>126</td>
+  </tr>
+  <tr>
+    <td>분ᆞ반기검토</td>
+    <td>59</td><td>156</td>
+    <td>222</td><td>267</td>
+    <td>22096</td><td>12787</td>
+    <td>7149</td><td>3072</td>
+    <td>4801</td><td>4327</td>
+    <td>34327</td><td>20609</td>
+  </tr>
+  <tr>
+    <td>감사</td>
+    <td>412</td><td>308</td>
+    <td>777</td><td>1004</td>
+    <td>22142</td><td>29004</td>
+    <td>7145</td><td>11145</td>
+    <td>20233</td><td>16076</td>
+    <td>50709</td><td>57537</td>
+  </tr>
+</table>
+"""
+
+
+def test_transposed_role_columns_read_samsung_shape() -> None:
+    ctx = ExtractionContext(html=TRANSPOSED_HTML, sections=locate_sections(TRANSPOSED_HTML))
+    item = extract_hours(ctx)
+    assert item.status is ExtractionStatus.found
+    cells = item.value.cells
+    partner = [
+        c
+        for c in cells
+        if c.role_key == "engagement_partner"
+        and c.metric_key == "audit_hours"
+        and c.period == "current"
+    ]
+    specialist = [
+        c
+        for c in cells
+        if c.role_key == "specialist"
+        and c.metric_key == "audit_hours"
+        and c.period == "current"
+    ]
+    review = [
+        c
+        for c in cells
+        if c.role_key == "engagement_partner"
+        and c.metric_key == "interim_review"
+        and c.period == "current"
+    ]
+    assert partner[0].value == 777.0
+    assert specialist[0].value == 20233.0
+    assert review[0].value == 222.0
+    assert validate_hours(item.value).ok is True
+
+
 def test_extracted_brief_table_passes_hours_check() -> None:
     ctx = ExtractionContext(html=HTML, sections=locate_sections(HTML))
     assert validate_hours(extract_hours(ctx).value).ok is True

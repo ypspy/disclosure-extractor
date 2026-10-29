@@ -98,6 +98,8 @@ def _cells_from_grid(grid: list[list[str]]) -> list[HoursCell] | None:
     header_n = _header_row_count(grid)
     if header_n <= 0 or header_n >= len(grid):
         return None
+    if _looks_transposed(grid, header_n):
+        return _cells_from_transposed(grid, header_n)
 
     header_rows = grid[:header_n]
     stacked = stack_headers(header_rows)
@@ -116,6 +118,107 @@ def _cells_from_grid(grid: list[list[str]]) -> list[HoursCell] | None:
     for row in grid[header_n:]:
         cells.extend(_row_cells(row, axes))
     return cells
+
+
+def _looks_transposed(grid: list[list[str]], header_n: int) -> bool:
+    """Roles sit in columns when the first data-row label is a metric, not a role."""
+    first = grid[header_n]
+    metric_key = _row_metric(first)[1]
+    role_key = _best_key(first[0] if first else "", HOUR_ROLE_ALIASES)
+    return metric_key in _HOURS_METRICS and role_key is None
+
+
+def _cells_from_transposed(grid: list[list[str]], header_n: int) -> list[HoursCell] | None:
+    header_rows = grid[:header_n]
+    stacked = stack_headers(header_rows)
+    width = max(len(row) for row in grid)
+    roles: list[tuple[str | None, _Period | None, str] | None] = []
+    role_hits = 0
+    for col in range(width):
+        axis = _column_role(header_rows, stacked, col)
+        roles.append(axis)
+        if axis is not None and axis[0] is not None:
+            role_hits += 1
+    if role_hits < 2:
+        return None
+
+    cells: list[HoursCell] = []
+    for row in grid[header_n:]:
+        metric_text, metric_key = _row_metric(row)
+        if not metric_text:
+            continue
+        for col, axis in enumerate(roles):
+            if axis is None:
+                continue
+            role_key, period, role_text = axis
+            raw = row[col] if col < len(row) else ""
+            mapped = (
+                role_key is not None
+                and metric_key is not None
+                and period in ("current", "prior")
+            )
+            cells.append(
+                HoursCell(
+                    role=role_text,
+                    role_key=role_key if mapped else None,
+                    metric=metric_text,
+                    metric_key=metric_key if mapped else None,
+                    period=period if mapped else None,
+                    value=to_number(raw),
+                    unmapped=not mapped,
+                )
+            )
+    return cells or None
+
+
+def _column_role(
+    header_rows: list[list[str]],
+    stacked: list[str],
+    col: int,
+) -> tuple[str | None, _Period | None, str] | None:
+    header_cells = [row[col] if col < len(row) else "" for row in header_rows]
+    stacked_label = stacked[col] if col < len(stacked) else ""
+    period = None
+    for cell in reversed(header_cells):
+        if cell:
+            period = _period_of(cell)
+            if period is not None:
+                break
+    if period is None:
+        period = _period_of(stacked_label, threshold=92.0)
+
+    role_key: str | None = None
+    role_text = ""
+    for cell in reversed(header_cells):
+        if not cell or _period_of(cell) is not None:
+            continue
+        found = _best_key(cell, HOUR_ROLE_ALIASES)
+        if found is not None:
+            role_key = found
+            role_text = cell
+            break
+    if role_key is None:
+        role_key = _best_key(stacked_label, HOUR_ROLE_ALIASES, threshold=92.0)
+        role_text = stacked_label
+    if not role_text or role_text in _STUB_LABELS:
+        return None
+    return role_key, period, role_text
+
+
+def _row_metric(row: list[str]) -> tuple[str, str | None]:
+    last_text = ""
+    last_key: str | None = None
+    for cell in row[:2]:
+        if not cell:
+            continue
+        key = _best_key(cell, HOUR_METRIC_ALIASES)
+        if key is not None:
+            last_text = cell
+            last_key = key
+    if last_key is not None:
+        return last_text, last_key
+    label = next((cell for cell in row[:2] if cell), "")
+    return label, None
 
 
 class _Axis(NamedTuple):

@@ -79,7 +79,7 @@
 | 부채총계 | `total_liability` | 재무상태표 |
 | 유동부채 | `current_liability` | 재무상태표 |
 | 자본총계 | `total_equity` | 재무상태표 |
-| 매출액 | `revenue` | 손익계산서 |
+| 매출액 | `revenue` | 손익계산서. `영업수익`·`공사수익`도 이 칸이다 |
 | 영업이익 | `operating_income` | 손익계산서 |
 | 당기순손익 | `net_income` | 손익계산서 |
 

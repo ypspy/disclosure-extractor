@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from dart_parser.fallback.schemas import ExtractionStatus, Icfr
@@ -38,16 +39,18 @@ def _is_leaf(window: str) -> bool:
     text = normalize_text(html_to_text(window))
     if "운영보고서" in text and "감사의견" not in text and "검토의견" not in text:
         return False
-    return "내부회계관리제도" in text and ("감사의견" in text or "검토의견" in text)
+    return "내부회계관리제도" in text and (
+        "감사의견" in text or "검토의견" in text or "감사보고서" in text
+    )
 
 
 def _from_leaf(window: str) -> Icfr:
     text = normalize_text(html_to_text(window))
-    engagement: IcfrEngagement = (
-        "review"
-        if "검토의견" in text or ("검토" in text and "감사의견" not in text)
-        else "audit"
-    )
+    engagement: IcfrEngagement = "audit"
+    if "감사보고서" not in text and (
+        "검토의견" in text or ("검토" in text and "감사의견" not in text)
+    ):
+        engagement = "review"
     return Icfr(
         icfr_engagement=engagement,
         icfr_opinion_code=_opinion_code(text, engagement),
@@ -56,7 +59,13 @@ def _from_leaf(window: str) -> Icfr:
 
 
 def _opinion_code(text: str, engagement: str) -> str | None:
-    if engagement == "audit" and "중요한 취약점" in text:
+    compact = text.replace(" ", "")
+    if "효과적으로설계" in compact or "효과적으로운영" in compact:
+        return "적정"
+    if engagement == "audit" and re.search(
+        r"중요한\s*취약점이\s*(존재합니다|있으며)|중요한\s*취약점을\s*발견",
+        text,
+    ):
         return "부적정"
     codes = _REVIEW_CODES if engagement == "review" else _AUDIT_CODES
     for code in codes:

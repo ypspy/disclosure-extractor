@@ -40,6 +40,14 @@ def test_run_from_html_fills_identification_before_accounts(mock_bs_html: str) -
     assert result.extraction.subsidiary.subsidiary_status.value == "not_applicable"
 
 
+def test_missing_accounts_is_a_validation_failure() -> None:
+    html = "<p>주식회사 예시</p><p>감사보고서</p><p>제5기 2024.01.01부터 2024.12.31까지</p>"
+    result = Pipeline().run_from_html(html, use_fallback=False)
+    assert result.extraction.accounts.status is ExtractionStatus.missing
+    assert result.validation.ok is False
+    assert any(issue.code == "accounts_missing" for issue in result.validation.issues)
+
+
 def test_run_from_html_smoke_on_standard_min() -> None:
     html = (SAMPLE_DIR / "mock_standard_min.html").read_text(encoding="utf-8")
     result = Pipeline().run_from_html(html, rcept_no="min", use_fallback=False)

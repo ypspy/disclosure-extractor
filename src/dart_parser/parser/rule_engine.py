@@ -8,11 +8,24 @@ from dataclasses import dataclass, field
 
 from dart_parser.fallback.schemas import Amount
 from dart_parser.normalizer.cleaner import normalize_text
+from dart_parser.normalizer.numeric import to_number
 from dart_parser.normalizer.table_grid import Table
-from dart_parser.parser.anchor_matcher import find_rows, map_columns, stack_headers
+from dart_parser.parser.anchor_matcher import (
+    canonical,
+    find_rows,
+    map_columns,
+    stack_headers,
+)
 from dart_parser.parser.unit_extractor import extract_unit
 
-_TERM_RE = re.compile(r"제\s*(\d+)\s*기")
+# 제5기, 제 55 기, 제 55 (당) 기, 제55당기 after canonical.
+_TERM_RE = re.compile(r"제\s*(\d+)\s*(?:\(?\s*[당전]\s*\)?)?\s*기")
+_CURRENT_LABEL_RE = re.compile(r"당기|제\d+\(?당\)?")
+_PRIOR_LABEL_RE = re.compile(r"전기|제\d+\(?전\)?")
+
+
+def _is_current_period_label(compact: str) -> bool:
+    return _CURRENT_LABEL_RE.search(compact) is not None
 
 
 @dataclass
@@ -60,26 +73,48 @@ def infer_header_row_count(grid: Sequence[Sequence[str]]) -> int:
     return 1
 
 
-def detect_period_columns(labels: Sequence[str]) -> dict[str, int]:
-    """Map ``current`` / ``prior`` to column indexes.
-
-    Prefers 당기/전기 labels; otherwise 제N기 columns (larger term = current).
-    When several columns share a period, prefer the one whose label contains 금액
-    and skip 비고.
-    """
+def period_column_groups(labels: Sequence[str]) -> dict[str, list[int]]:
+    """All ``current`` / ``prior`` column indexes (DART duplicates a 당기 header)."""
     term_cols: dict[int, list[int]] = {}
     current_cands: list[int] = []
     prior_cands: list[int] = []
     for i, label in enumerate(labels):
-        text = normalize_text(label)
-        compact = text.replace(" ", "")
-        match = _TERM_RE.search(text)
+        compact = canonical(label)
+        match = _TERM_RE.search(normalize_text(label)) or _TERM_RE.search(compact)
         if match:
             term_cols.setdefault(int(match.group(1)), []).append(i)
-        if "당기" in compact and "전기" not in compact:
+        if _is_current_period_label(compact) and "전기" not in compact:
             current_cands.append(i)
-        elif "전기" in compact:
+        elif _PRIOR_LABEL_RE.search(compact):
             prior_cands.append(i)
+    if current_cands or prior_cands:
+        return {
+            key: cols
+            for key, cols in (("current", current_cands), ("prior", prior_cands))
+            if cols
+        }
+    if len(term_cols) >= 2:
+        terms = sorted(term_cols)
+        return {"current": term_cols[terms[-1]], "prior": term_cols[terms[0]]}
+    if len(term_cols) == 1:
+        return {"current": next(iter(term_cols.values()))}
+    return {}
+
+
+def detect_period_columns(
+    labels: Sequence[str],
+    grid: Sequence[Sequence[str]] | None = None,
+    header_row_count: int = 1,
+) -> dict[str, int]:
+    """Map ``current`` / ``prior`` to column indexes.
+
+    Prefers 당기/전기 labels (after ``canonical``, so ``제 55 (당) 기`` counts);
+    otherwise 제N기 columns (larger term = current). When several columns share
+    a period, prefer 금액, then the column with the most numeric body cells
+    (DART flattens a 당기 header across an empty 주석 column and the amount).
+    Skip 비고.
+    """
+    groups = period_column_groups(labels)
 
     def pick(cands: list[int]) -> int | None:
         if not cands:
@@ -87,36 +122,32 @@ def detect_period_columns(labels: Sequence[str]) -> dict[str, int]:
         for i in cands:
             if "금액" in labels[i]:
                 return i
-        for i in cands:
-            if "비고" not in labels[i]:
-                return i
-        return cands[0]
+        usable = [i for i in cands if "비고" not in labels[i]] or cands
+        if grid is not None:
+            scored = [(_numeric_hits(grid, i, header_row_count), i) for i in usable]
+            best = max(n for n, _ in scored)
+            return max((i for n, i in scored if n == best), default=usable[-1])
+        return usable[-1]
 
     out: dict[str, int] = {}
-    if current_cands or prior_cands:
-        current = pick(current_cands)
-        prior = pick(prior_cands)
-        if current is not None:
-            out["current"] = current
-        if prior is not None:
-            out["prior"] = prior
-        return out
-
-    if len(term_cols) >= 2:
-        terms = sorted(term_cols)
-        current = pick(term_cols[terms[-1]])
-        prior = pick(term_cols[terms[0]])
-        if current is not None:
-            out["current"] = current
-        if prior is not None:
-            out["prior"] = prior
-        return out
-
-    if len(term_cols) == 1:
-        current = pick(next(iter(term_cols.values())))
-        if current is not None:
-            out["current"] = current
+    for key, cands in groups.items():
+        chosen = pick(cands)
+        if chosen is not None:
+            out[key] = chosen
     return out
+
+
+def _numeric_hits(
+    grid: Sequence[Sequence[str]],
+    col: int,
+    header_row_count: int,
+) -> int:
+    start = min(max(header_row_count, 0), len(grid))
+    return sum(
+        1
+        for row in grid[start:]
+        if col < len(row) and to_number(row[col]) is not None
+    )
 
 
 def stacked_header_labels(grid: Sequence[Sequence[str]], header_row_count: int) -> list[str]:

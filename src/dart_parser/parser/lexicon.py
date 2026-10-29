@@ -19,7 +19,7 @@ ACCOUNT_ALIASES: dict[str, list[str]] = {
     "total_liability": ["부채총계"],
     "current_liability": ["유동부채"],
     "total_equity": ["자본총계"],
-    "revenue": ["매출액", "매출"],
+    "revenue": ["매출액", "매출", "영업수익", "공사수익"],
     "operating_income": ["영업이익", "영업손실"],
     "net_income": ["당기순이익", "당기순손실", "당기순손익"],
 }
@@ -30,7 +30,10 @@ HOUR_ROLE_ALIASES: dict[str, list[str]] = {
     "cpa": ["등록공인회계사"],
     "trainee": ["수습공인회계사"],
     "construction_expert": ["수주산업·건설계약 전문가", "수주산업 전문가"],
-    "specialist": ["전산·가치평가·세무 전문가"],
+    "specialist": [
+        "전산·가치평가·세무 전문가",
+        "전산감사·세무·가치평가 등 전문가",
+    ],
     "total": ["합계"],
     "other": ["기타"],
 }
@@ -72,7 +75,7 @@ OPINION_ALIASES: dict[str, list[str]] = {
 ACCOUNT_REJECT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "*": ("부채와자본총계", "부채및자본총계"),
     "inventory": ("충당",),
-    "revenue": ("매출원가", "계속", "중단", "귀속"),
+    "revenue": ("매출원가", "매출총이익", "영업외", "기타", "계속", "중단", "귀속"),
     "operating_income": ("영업외", "계속", "중단", "귀속"),
     "net_income": ("계속", "중단", "귀속", "지배", "비지배", "총포괄"),
     "current_asset": ("비유동", "기타"),
