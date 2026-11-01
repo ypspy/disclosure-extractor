@@ -11,7 +11,7 @@
 3. 계속기업은 비적정 의견의 근거로만 있는 경우, 전기 인용만 있는 경우, 청산기준 강조사항만 있는 경우 모두 `1`이다.
 4. 감사의견 값은 `적정`, `한정`, `부적정`, `거절`이다. 골드 라벨은 `한정`을 받는다.
 
-1단계로 들어온 `matching.py`는 v19 규칙 그대로다. 계정은 `raw`에서 읽은 표시 정수와 단위 문자열(`원`, `천원`, `백만원`)을 비교한다. 위 1·3·4의 코드 반영과 추출기 수정은 아직이다.
+계정 비교는 `value`와 `unit_scale`이다. 감사의견 라벨은 `한정`을 받는다. 계속기업 세 경우를 `1`로 내는 수정과 의견 `한정`을 내는 수정은 추출기 본체에 아직 없다.
 
 ## 공통
 
@@ -116,7 +116,7 @@ v19 `REVIEW_SUBJECT_MAP`(`extraction_reviews` subject → 골드 subject)은 쓰
 
 ## 이식 상태
 
-1단계는 `periods.py`, `scoring.py`, `db.py`, `schema.py`, `matching.py`, `cache.py`와 테스트, `gold_fixtures.py`를 옮겼다. `scoring.py`와 `matching.py`가 `subjects.py`, `snapshots.py`, `sampler.py`를 import하므로 그 세 파일도 원문 그대로 같이 왔다. 묶음 키를 이 표로 다시 쓰는 일, 표본 SQL에서 v19 facts 조건을 빼는 일, 스냅샷을 `Pipeline.run_from_html` 출력으로 바꾸는 일은 2단계다.
+1단계는 채점 코어를 옮겼다. 2단계는 `subjects.py`, `labels.py`, `evidence.py`를 이 표의 묶음·subject·섹션 창으로 다시 썼다. `sampler.py`는 카탈로그의 공시·엔트리만 보고, `snapshots.py`는 캐시 HTML에 `Pipeline.run_from_html`을 돌린 `StandardExtraction`을 버전·커밋과 함께 저장한다. 검토 앱은 아직 없다.
 
 ## dart-wrapper `feat/gold-review` 이식 제안
 

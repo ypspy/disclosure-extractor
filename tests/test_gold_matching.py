@@ -9,26 +9,31 @@ def test_auditor_normalized() -> None:
     assert matches("auditor", "value", "삼일 회계법인", "삼일회계법인")
 
 
-def test_amount_display_unit_exact() -> None:
-    predicted = {"raw": "(1,234)", "unit_raw": "천원", "value": -1234}
+def test_amount_value_and_unit_scale() -> None:
+    predicted = {"value": -1234, "unit_scale": 1000}
     assert matches(
         "accounts",
         "inventory@current",
         predicted,
-        {"display": "-1234", "unit": "천원"},
+        {"value": -1234, "unit_scale": 1000},
     )
     assert not matches(
         "accounts",
         "inventory@current",
         predicted,
-        {"display": "-1234", "unit": "원"},
+        {"value": -1234, "unit_scale": 1},
     )
     assert not matches(
         "accounts",
         "inventory@current",
         predicted,
-        {"display": "-1235", "unit": "천원"},
+        {"value": -1235, "unit_scale": 1000},
     )
+
+
+def test_opinion_qualified_matches() -> None:
+    assert matches("opinion", "value", "한정", "한정")
+    assert not matches("opinion", "value", "적정", "한정")
 
 
 def test_negative_parentheses() -> None:

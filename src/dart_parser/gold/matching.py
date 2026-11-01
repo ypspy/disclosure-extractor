@@ -8,7 +8,6 @@ from typing import Any
 from dart_parser.gold.subjects import TABLE_BUNDLES
 
 _AUDITOR_TOKENS = ("주식회사", "회계법인", "(주)", "㈜")
-_UNIT_ALIASES = {"원": "원", "천원": "천원", "백만원": "백만원"}
 
 
 def normalize_auditor(value: str) -> str:
@@ -41,14 +40,8 @@ def normalize_amount(raw: str | None) -> int | None:
     return number
 
 
-def _normalize_unit(unit: str | None) -> str:
-    """표시 단위 문자열을 비교용으로 맞춘다."""
-    text = (unit or "").replace(" ", "")
-    return _UNIT_ALIASES.get(text, text)
-
-
 def matches(bundle: str, subject: str, predicted: Any, gold_value: Any) -> bool:
-    """예측값이 골드 정답과 같은지. 금액은 표시 단위까지 같아야 한다."""
+    """예측값이 골드 정답과 같은지. 계정은 표시값과 단위 배수가 둘 다 같아야 한다."""
     del subject
     if bundle in TABLE_BUNDLES:
         if not isinstance(gold_value, dict):
@@ -57,15 +50,9 @@ def matches(bundle: str, subject: str, predicted: Any, gold_value: Any) -> bool:
     if bundle == "accounts":
         if not isinstance(predicted, dict) or not isinstance(gold_value, dict):
             return False
-        amount = normalize_amount(predicted.get("raw"))
-        try:
-            display = int(str(gold_value.get("display")).replace(",", "").strip())
-        except (TypeError, ValueError):
-            return False
-        units_match = _normalize_unit(predicted.get("unit_raw")) == _normalize_unit(
-            gold_value.get("unit")
-        )
-        return amount is not None and amount == display and units_match
+        return predicted.get("value") == gold_value.get("value") and predicted.get(
+            "unit_scale"
+        ) == gold_value.get("unit_scale")
     if bundle == "auditor":
         if predicted is None or gold_value is None:
             return False

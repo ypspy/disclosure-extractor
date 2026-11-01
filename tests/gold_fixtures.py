@@ -184,7 +184,7 @@ def _insert_fact(
             rcept_no,
             corp_code,
             "표본회사",
-            "감사보고서",
+            "연결감사보고서" if fs_scope == "consolidated" else "감사보고서",
             report_type,
             correction,
             rcept_dt,
@@ -220,6 +220,40 @@ def _insert_fact(
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (f"{rcept_no}:{dcm_no}:kam", rcept_no, dcm_no, kam, "9", dtd, viewer),
+        )
+    if icfr_ok:
+        conn.execute(
+            """
+            INSERT INTO entries (
+                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{rcept_no}:{dcm_no}:icfr",
+                rcept_no,
+                dcm_no,
+                "내부회계관리제도에 대한 감사의견",
+                "6",
+                dtd,
+                viewer,
+            ),
+        )
+    if fs_scope == "consolidated":
+        conn.execute(
+            """
+            INSERT INTO entries (
+                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{rcept_no}:{dcm_no}:sub",
+                rcept_no,
+                dcm_no,
+                "종속기업",
+                "7",
+                dtd,
+                viewer,
+            ),
         )
     accounts = [
         {

@@ -1,7 +1,6 @@
-"""Symbols the ported v19 gold code imported from ``research.extracting``.
+"""v19 facts 행을 읽던 이름.
 
-Stage 1 keeps these names so ``sampler`` and ``snapshots`` load. The population
-query still filters on ``EXTRACTOR_VERSION``. That filter is unchanged here.
+표본 쿼리는 이 버전으로 거르지 않는다. ``status_attr``은 예전 스냅샷 claim에만 쓴다.
 """
 
 from __future__ import annotations

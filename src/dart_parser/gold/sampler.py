@@ -12,43 +12,45 @@ from typing import Any
 
 from dart_parser.gold.db import catalog_file
 from dart_parser.gold.periods import assign_period, layout_era, period_dtd_mismatch
-from dart_parser.gold.subjects import extract_predicted, subjects_for
-from dart_parser.gold.v19_fields import BUNDLE_KEYS, EXTRACTOR_VERSION, status_attr
+from dart_parser.gold.subjects import (
+    BUNDLE_KEYS,
+    extract_predicted,
+    extraction_status,
+    subjects_for,
+)
+from dart_parser.gold.v19_fields import status_attr
 
 POPULATION_SQL = """
 SELECT
-    f.rcept_no AS rcept_no,
-    f.dcm_no AS dcm_no,
-    f.source_report_type AS source_report_type,
-    f.fs_scope AS fs_scope,
-    f.opinion_resolved AS opinion_resolved,
-    d.rcept_dt AS rcept_dt,
-    d.year_end AS year_end,
-    d.correction_type AS correction_type,
-    d.corp_code AS corp_code,
-    d.report_nm AS report_nm,
-    c.corp_cls AS corp_cls,
-    e.dtd AS dtd,
-    CASE WHEN EXISTS (
-        SELECT 1 FROM cat.entries k
-        WHERE k.rcept_no = f.rcept_no
-          AND IFNULL(k.dcm_no, '') = IFNULL(f.dcm_no, '')
-          AND k.section_name LIKE '%핵심감사사항%'
-          AND k.section_name NOT LIKE '%수주산업%'
-    ) THEN 1 ELSE 0 END AS kam,
-    (
-        SELECT group_concat(rv.signal)
-        FROM cat.extraction_reviews rv
-        WHERE rv.rcept_no = f.rcept_no AND rv.dcm_no = f.dcm_no
-    ) AS review_signals
-FROM cat.audit_report_facts f
-JOIN cat.disclosures d ON d.rcept_no = f.rcept_no
+    d.rcept_no AS rcept_no,
+    e.dcm_no AS dcm_no,
+    MAX(d.report_type) AS source_report_type,
+    CASE
+        WHEN MAX(d.report_type) = 'F002'
+          OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
+        THEN 'consolidated'
+        ELSE 'separate'
+    END AS fs_scope,
+    '' AS opinion_resolved,
+    MAX(d.rcept_dt) AS rcept_dt,
+    MAX(d.year_end) AS year_end,
+    MAX(d.correction_type) AS correction_type,
+    MAX(d.corp_code) AS corp_code,
+    MAX(d.report_nm) AS report_nm,
+    MAX(c.corp_cls) AS corp_cls,
+    MAX(e.dtd) AS dtd,
+    MAX(CASE
+        WHEN e.section_name LIKE '%핵심감사사항%'
+         AND e.section_name NOT LIKE '%수주산업%'
+        THEN 1 ELSE 0 END) AS kam,
+    '' AS review_signals
+FROM cat.disclosures d
+JOIN cat.entries e ON e.rcept_no = d.rcept_no
 LEFT JOIN cat.corps c ON c.corp_code = d.corp_code
-LEFT JOIN cat.entries e ON e.entry_id = f.cover_entry_id
-WHERE f.fetch_status = 'ok'
-  AND f.source_report_type IN ('F001', 'F002', 'A001')
-  AND f.extractor_version = ?
+WHERE d.report_type IN ('F001', 'F002', 'A001')
   AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
+  AND IFNULL(e.dcm_no, '') != ''
+GROUP BY d.rcept_no, e.dcm_no
 """
 
 _WINDOWS = (
@@ -252,7 +254,7 @@ def _pop_from_sql(record: sqlite3.Row) -> PopRow | None:
 def load_population(conn: sqlite3.Connection) -> list[PopRow]:
     """읽기 전용 카탈로그에서 골드 모집단을 읽는다."""
     rows: list[PopRow] = []
-    for record in conn.execute(POPULATION_SQL, (EXTRACTOR_VERSION,)):
+    for record in conn.execute(POPULATION_SQL):
         parsed = _pop_from_sql(record)
         if parsed is not None:
             rows.append(parsed)
@@ -524,42 +526,85 @@ def build_sample(conn: sqlite3.Connection, params: SampleParams | None = None) -
     return run_id
 
 
-CLAIM_FILTERS: dict[str, str] = {
-    "icfr": "f.icfr_status = 'ok'",
-    "subsidiary": "f.fs_scope = 'consolidated' AND f.subsidiary_status = 'ok'",
-    "hours": "f.hours_status = 'ok'",
-    "activities": "f.activities_status = 'ok'",
-    "communications": "f.communications_status = 'ok'",
+_SECTION_NEEDLES: dict[str, tuple[str, ...]] = {
+    "company_name": ("표지",),
+    "document_title": ("표지",),
+    "fiscal_term": ("표지",),
+    "auditor": ("감사의견", "독립된"),
+    "opinion": ("감사의견", "독립된"),
+    "gaap": ("감사의견", "독립된"),
+    "audit_report_date": ("감사의견", "독립된"),
+    "current_period": ("표지",),
+    "hours": ("외부감사 실시내용", "감사투입"),
+    "activities": ("외부감사 실시내용", "주요감사실시"),
+    "communications": ("외부감사 실시내용", "커뮤니케이션"),
+    "accounts": ("재무상태표", "대차대조표", "손익계산서"),
+    "icfr": ("내부회계관리제도",),
+    "going_concern": ("계속기업", "강조사항", "감사의견"),
+    "subsidiary": ("종속기업",),
+    "notes_toc": ("주석",),
 }
 
 
+def _needles(bundle: str, subject: str) -> tuple[str, ...]:
+    """필드가 문서에 있다는 섹션 제목."""
+    if bundle == "accounts":
+        account = subject.split("@", 1)[0]
+        if account in {"revenue", "operating_income", "net_income"}:
+            return ("손익계산서",)
+        return ("재무상태표", "대차대조표")
+    return _SECTION_NEEDLES.get(bundle, ())
+
+
+def _section_hit(fact: dict[str, Any], bundle: str, subject: str) -> bool:
+    """엔트리 제목에 그 필드 섹션이 있는지."""
+    names = fact.get("_sections")
+    if not isinstance(names, list):
+        return False
+    blob = " ".join(str(name) for name in names)
+    if not any(needle in blob for needle in _needles(bundle, subject)):
+        return False
+    if bundle == "subsidiary":
+        report_type = str(fact.get("report_type") or "")
+        report_nm = str(fact.get("report_nm") or "")
+        return report_type == "F002" or "연결" in report_nm
+    return True
+
+
 def is_claim(fact: dict[str, Any], bundle: str, subject: str) -> bool:
-    """상태가 ok이고 예측값이 있으면 추출기가 값을 주장한 것이다."""
+    """예측값이 있고, 표준 스냅샷이면 status가 found일 때 주장으로 본다."""
+    if isinstance(fact.get("_sections"), list):
+        return _section_hit(fact, bundle, subject)
     if extract_predicted(fact, bundle, subject) is None:
         return False
-    return fact.get(status_attr(bundle)) == "ok"
+    status = extraction_status(fact, bundle)
+    if status is not None:
+        return status == "found"
+    if bundle == "icfr":
+        return fact.get("icfr_status") == "ok"
+    try:
+        column = status_attr(bundle)
+    except KeyError:
+        return True
+    if column in fact:
+        return fact.get(column) == "ok"
+    return True
 
 
-def _claim_sql(bundle: str, subject: str) -> str:
-    """과표집 후보를 거르는 SQL 조건."""
-    if bundle == "accounts":
-        account = subject.split("@", 1)[0].replace("'", "")
-        return f'f.accounts LIKE \'%"account": "{account}"%\''
-    if bundle in CLAIM_FILTERS:
-        extra = ""
-        if bundle == "icfr" and subject == "opinion":
-            extra = " AND IFNULL(f.icfr_opinion_code, '') != ''"
-        if bundle == "icfr" and subject == "engagement":
-            extra = " AND IFNULL(f.icfr_engagement, '') != ''"
-        return CLAIM_FILTERS[bundle] + extra
-    column = status_attr(bundle)
-    return f"f.{column} = 'ok'"
+def _section_predicate(bundle: str, subject: str) -> str:
+    """문서 위치(엔트리 제목)로 필드가 있는 문서를 고른다."""
+    needles = _needles(bundle, subject)
+    parts = [f"e.section_name LIKE '%{needle}%'" for needle in needles]
+    clause = "(" + " OR ".join(parts) + ")" if parts else "1 = 0"
+    if bundle == "subsidiary":
+        clause += " AND (d.report_type = 'F002' OR IFNULL(d.report_nm, '') LIKE '%연결%')"
+    return clause
 
 
 def _load_sample_facts(
     conn: sqlite3.Connection, run_id: str
 ) -> list[tuple[sqlite3.Row, dict[str, Any]]]:
-    """이번 실행의 표본과 카탈로그 facts를 짝짓는다."""
+    """이번 실행의 표본과 카탈로그 섹션 제목을 짝짓는다."""
     samples = conn.execute(
         """
         SELECT period, role, rcept_no, dcm_no
@@ -570,15 +615,27 @@ def _load_sample_facts(
     ).fetchall()
     paired: list[tuple[sqlite3.Row, dict[str, Any]]] = []
     for sample in samples:
-        fact = conn.execute(
+        rows = conn.execute(
             """
-            SELECT * FROM cat.audit_report_facts
-            WHERE rcept_no = ? AND dcm_no = ?
+            SELECT e.section_name AS section_name,
+                   d.report_type AS report_type,
+                   d.report_nm AS report_nm
+            FROM cat.entries e
+            JOIN cat.disclosures d ON d.rcept_no = e.rcept_no
+            WHERE e.rcept_no = ? AND IFNULL(e.dcm_no, '') = IFNULL(?, '')
             """,
             (sample["rcept_no"], sample["dcm_no"]),
-        ).fetchone()
-        if fact is not None:
-            paired.append((sample, dict(fact)))
+        ).fetchall()
+        paired.append(
+            (
+                sample,
+                {
+                    "_sections": [row["section_name"] or "" for row in rows],
+                    "report_type": rows[0]["report_type"] if rows else "",
+                    "report_nm": rows[0]["report_nm"] if rows else "",
+                },
+            )
+        )
     return paired
 
 
@@ -657,34 +714,39 @@ def oversample(
         "SELECT seed FROM gold_runs WHERE run_id = ?", (run_id,)
     ).fetchone()
     seed = run["seed"] if run else "gold-2026-10"
-    claim_sql = _claim_sql(bundle, subject)
+    section_sql = _section_predicate(bundle, subject)
     candidates = conn.execute(
         f"""
         SELECT
-            f.rcept_no AS rcept_no,
-            f.dcm_no AS dcm_no,
-            f.source_report_type AS source_report_type,
-            f.fs_scope AS fs_scope,
-            d.rcept_dt AS rcept_dt,
-            d.year_end AS year_end,
-            d.correction_type AS correction_type,
-            d.corp_code AS corp_code,
-            c.corp_cls AS corp_cls,
-            e.dtd AS dtd
-        FROM cat.audit_report_facts f
-        JOIN cat.disclosures d ON d.rcept_no = f.rcept_no
+            d.rcept_no AS rcept_no,
+            e.dcm_no AS dcm_no,
+            MAX(d.report_type) AS source_report_type,
+            CASE
+                WHEN MAX(d.report_type) = 'F002'
+                  OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
+                THEN 'consolidated'
+                ELSE 'separate'
+            END AS fs_scope,
+            MAX(d.rcept_dt) AS rcept_dt,
+            MAX(d.year_end) AS year_end,
+            MAX(d.correction_type) AS correction_type,
+            MAX(d.corp_code) AS corp_code,
+            MAX(c.corp_cls) AS corp_cls,
+            MAX(e.dtd) AS dtd
+        FROM cat.disclosures d
+        JOIN cat.entries e ON e.rcept_no = d.rcept_no
         LEFT JOIN cat.corps c ON c.corp_code = d.corp_code
-        LEFT JOIN cat.entries e ON e.entry_id = f.cover_entry_id
-        WHERE f.fetch_status = 'ok'
-          AND f.source_report_type IN ('F001', 'F002', 'A001')
-          AND f.extractor_version = ?
-          AND {claim_sql}
+        WHERE d.report_type IN ('F001', 'F002', 'A001')
+          AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
+          AND IFNULL(e.dcm_no, '') != ''
+          AND {section_sql}
           AND NOT EXISTS (
               SELECT 1 FROM gold_samples s
-              WHERE s.run_id = ? AND s.rcept_no = f.rcept_no AND s.dcm_no = f.dcm_no
+              WHERE s.run_id = ? AND s.rcept_no = d.rcept_no AND s.dcm_no = e.dcm_no
           )
+        GROUP BY d.rcept_no, e.dcm_no
         """,
-        (EXTRACTOR_VERSION, run_id),
+        (run_id,),
     ).fetchall()
     grouped: dict[str, list[sqlite3.Row]] = {}
     for record in candidates:
@@ -730,14 +792,6 @@ def oversample(
         picked = ordered[:quota]
         weight = (len(rows) / len(picked)) if picked else 0.0
         for record in picked:
-            signals = conn.execute(
-                """
-                SELECT signal FROM cat.extraction_reviews
-                WHERE rcept_no = ? AND dcm_no = ?
-                """,
-                (record["rcept_no"], record["dcm_no"]),
-            ).fetchall()
-            signal_names = [item[0] for item in signals if item[0]]
             next_order += 1
             meta = {
                 "oversample_for": f"{bundle}:{subject}",
@@ -746,8 +800,8 @@ def oversample(
                 "dtd": record["dtd"] or "",
                 "fye": record["year_end"] or "",
                 "layout_era": layout_era(record["year_end"]),
-                "in_extraction_reviews": 1 if signal_names else 0,
-                "review_signals": signal_names,
+                "in_extraction_reviews": 0,
+                "review_signals": [],
                 "market_source": "current_tag",
                 "holdout": 0,
             }
