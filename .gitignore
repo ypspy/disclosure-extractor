@@ -17,6 +17,8 @@ htmlcov/
 .env
 .cache/
 .superpowers/
+gold.db
+gold*.db
 
 # OS / IDE
 .DS_Store
