@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from dart_parser.fallback.schemas import ACCOUNT_KEYS
+from dart_parser.normalizer.cleaner import normalize_text
 
 ACCOUNTS: tuple[str, ...] = ACCOUNT_KEYS
 
@@ -47,6 +49,49 @@ _LEGACY_COLUMNS: dict[str, str] = {
 }
 
 _LEGACY_ICFR = {"engagement": "icfr_engagement", "opinion": "icfr_opinion_code"}
+
+
+_BASIS_MARKERS: tuple[str, ...] = (
+    "한정의 근거",
+    "한정의견 근거",
+    "한정의견근거",
+    "부적정의 근거",
+    "부적정의견 근거",
+    "부적정의견근거",
+    "거절의 근거",
+    "의견거절 근거",
+    "의견거절근거",
+)
+_SECTION_BOUNDARIES: tuple[str, ...] = (
+    "강조사항",
+    "기타사항",
+    "핵심감사사항",
+    "경영진의 책임",
+    "감사의견",
+)
+_PRIOR_CITE_TOKENS: tuple[str, ...] = ("감사보고서", "인용", "기재", "언급", "표명")
+_LIQUIDATION_TOKENS: tuple[str, ...] = ("청산기준", "청산가치")
+_SENTENCE_RE = re.compile(r"(?<=다)[.。]\s*")
+
+
+def going_concern_value(text: str) -> int:
+    """당기 중요한 불확실성이면 1, 없으면 0.
+
+    한정·부적정·거절 의견의 근거로만 나오는 경우, 전기 인용만,
+    청산기준 강조사항만은 0이다.
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return 0
+    kept = [
+        sentence
+        for sentence in _sentences(_without_opinion_basis(normalized))
+        if not _is_prior_citation(sentence) and not _is_liquidation_only(sentence)
+    ]
+    judged = " ".join(kept)
+    if "계속기업" in judged and "중요한 불확실성" in judged:
+        return 1
+    return 0
 
 
 def subjects_for(bundle: str) -> list[str]:
@@ -207,6 +252,47 @@ def _legacy_scalar(body: dict[str, Any], bundle: str) -> Any:
         if token.lstrip("-").isdigit():
             return int(token)
     return value
+
+
+def _without_opinion_basis(text: str) -> str:
+    """한정·부적정·거절 근거 구간을 뺀다. 그 다음 문단 제목은 남긴다."""
+    result = text
+    while True:
+        positions = [
+            (result.find(marker), marker)
+            for marker in _BASIS_MARKERS
+            if result.find(marker) >= 0
+        ]
+        if not positions:
+            return " ".join(result.split())
+        start, marker = min(positions)
+        end = len(result)
+        for boundary in _SECTION_BOUNDARIES:
+            found = result.find(boundary, start + len(marker))
+            if found >= 0:
+                end = min(end, found)
+        if end <= start:
+            return " ".join(result.split())
+        result = f"{result[:start]} {result[end:]}"
+
+
+def _sentences(text: str) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    return [part.strip(" .") for part in _SENTENCE_RE.split(stripped) if part.strip(" .")]
+
+
+def _is_prior_citation(sentence: str) -> bool:
+    if "전기" not in sentence or "당기" in sentence:
+        return False
+    return any(token in sentence for token in _PRIOR_CITE_TOKENS)
+
+
+def _is_liquidation_only(sentence: str) -> bool:
+    if not any(token in sentence for token in _LIQUIDATION_TOKENS):
+        return False
+    return not ("계속기업" in sentence and "중요한 불확실성" in sentence)
 
 
 def _blank(value: Any) -> Any:
