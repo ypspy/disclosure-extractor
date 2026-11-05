@@ -8,10 +8,10 @@
 
 1. 계정 정답은 표시값 `value`와 단위 `unit_scale`이 둘 다 같을 때다.
 2. 회사명, 문서 제목, 기수, 주석 목차, 매출액, 영업이익은 기간 셀 99% 대상이다. 주석 목차는 개수와 제목 목록 전체를 한 subject로 판정한다.
-3. 계속기업은 비적정 의견의 근거로만 있는 경우, 전기 인용만 있는 경우, 청산기준 강조사항만 있는 경우 모두 `1`이다.
+3. 계속기업은 한정·부적정·거절 의견의 근거로만 있는 경우, 전기 인용만 있는 경우, 청산기준 강조사항만 있는 경우 모두 `0`이다.
 4. 감사의견 값은 `적정`, `한정`, `부적정`, `거절`이다. 골드 라벨은 `한정`을 받는다.
 
-계정 비교는 `value`와 `unit_scale`이다. 감사의견 라벨은 `한정`을 받는다. 계속기업 세 경우를 `1`로 내는 수정과 의견 `한정`을 내는 수정은 추출기 본체에 아직 없다.
+계정 비교는 `value`와 `unit_scale`이다. 감사의견 라벨은 `한정`을 받는다. 계속기업 세 경우의 골드는 `0`이다. 의견 `한정`을 내는 수정은 추출기 본체에 아직 없다.
 
 ## 공통
 
@@ -70,7 +70,7 @@ v19 판정 `na`는 위 두 비실패 상태를 한 칸에 넣는다. 골드 라�
 | 커뮤니케이션 | `communications.value.has_audit_committee`, `communications.value.items[]` (`round`, `date`, `raw`) | 표 전체 `table` | 희소(구서식). 별지 제4호 4절. 2절이나 3절만 있고 4절이 없으면 `not_in_regime` | `exhibit4_communications` | 묶음 `communications`, subject `table`, JSON 객체. 같다. 옛 공시의 상태는 `not_in_regime`으로 남긴다. |
 | 계정 | `accounts.value.{계정}.current`, `accounts.value.{계정}.prior`. 각 금액은 `Amount.raw`, `value`, `unit_scale`, `value_won` | 계정 당기·전기. 13×2 = 26 subject. 정답은 `value`와 `unit_scale`이 둘 다 같을 때 | 계정마다 아래 표 | 재무상태표 `bs`(구서식 이름 대차대조표), 손익계산서 `is_`(포괄손익 제목은 제외). 연결은 연결 표, 별도는 개별 표 | v19는 11계정 22칸이다. 매출액·영업이익이 없다. v19 `matching.py`는 `raw` 표시 정수와 단위 문자열을 비교한다. 이 저장소의 정답 조건은 `value`와 `unit_scale`이다. `raw`와 `value_won`은 스냅샷에 남긴다. 당기순손실·영업손실은 음수다. |
 | 내부회계 | `icfr.icfr_engagement` (`audit` / `review`), `icfr.icfr_opinion_code`, `icfr.icfr_status` | 단일 값 둘. subject `engagement`, `opinion`. `icfr_status`는 채점 값이 아니다 | 희소(제도). 비상장 개별 F001, 사업연도 2022년까지 F002는 leaf가 없으면 `not_in_regime` | `icfr_opinion`. 내부회계관리제도 감사·검토 의견. 회사 운영보고서는 이 항목이 아니다 | v19 subject `engagement`, `opinion`. 컬럼 `icfr_engagement`, `icfr_opinion_code`. 같다. v19 claim 필터 `icfr_status='ok'`는 이 추출기의 `found`에 해당한다. 감사 코드는 적정·부적정·거절(중요한 취약점은 부적정). 검토 코드는 적정·한정·거절·중요한 취약점. 추출기 `icfr_in_regime`은 F002이면서 사업연도 2023년 이후만 제도 안으로 본다. A001은 leaf가 있으면 `found`, 없으면 `not_in_regime`이다. |
-| 계속기업 | `going_concern.value`. 당기 중요한 불확실성이 있으면 `1`, 없으면 `0`. 비적정 의견의 근거로만 있는 경우, 전기 인용만 있는 경우, 청산기준 강조사항만 있는 경우도 `1` | 단일 값 `value` | 상시. 1인 문서가 적어도 필드 희소가 아니다. D11 목록에 없다 | `going_concern`. 강조사항, 기타사항, 계속기업. 창이 비면 문서 전체 | 묶음 `going_concern`, subject `value`, 0/1. 위 세 경우는 `1`이다. 추출기 `extract_going_concern`은 그 경우를 아직 `0`으로 둔다. |
+| 계속기업 | `going_concern.value`. 당기 중요한 불확실성이 있으면 `1`, 없으면 `0`. 한정·부적정·거절 의견의 근거로만 있는 경우, 전기 인용만 있는 경우, 청산기준 강조사항만 있는 경우는 `0` | 단일 값 `value` | 상시. 1인 문서가 적어도 필드 희소가 아니다. D11 목록에 없다 | `going_concern`. 강조사항, 기타사항, 계속기업. 창이 비면 문서 전체 | 묶음 `going_concern`, subject `value`, 0/1. 위 세 경우는 `0`이다. 추출기 `extract_going_concern`은 그 문장만 있으면 `0`이다. 근거 표지, `전기`, `청산`이 같은 창에 있으면 당기 불확실성까지 `0`으로 지운다. |
 | 종속기업 | `subsidiary.subsidiary_count` 정수, `subsidiary.subsidiary_status` | 단일 값 `value` = 개수. 상태는 채점 값이 아니다. 별도 문서는 `not_applicable`, 개수 `null` | 희소(연결만). 별도는 claim에서 빠진다 | `subsidiaries` 제목 창의 종속기업 표. 창이 비면 문서 안의 그 표. 관계기업·공동기업 행은 세지 않는다 | v19 묶음 이름은 `subsidiary_count`, `subjects.py` 묶음 키는 `subsidiary`, subject `value`. 이 저장소 묶음 키는 `subsidiary`다. |
 
 ### 계정 26칸
