@@ -52,7 +52,10 @@ def _seed(tmp_path: Path) -> tuple[Path, Path, Path]:
         """
         INSERT INTO gold_runs (
             run_id, seed, created_at, population_sql_sha, db_snapshot, params, stats
-        ) VALUES ('run', 'seed', '2026-11-06T00:00:00+00:00', 'x', NULL, '{}', '{}')
+        ) VALUES (
+            'run', 'seed', '2026-11-06T00:00:00+00:00', 'x', NULL,
+            '{"extractor_version": "0.1.0", "extractor_commit": "abc123"}', '{}'
+        )
         """
     )
     rows = [
@@ -152,7 +155,7 @@ def test_list_shows_samples_by_period_stratum_and_status(tmp_path: Path) -> None
     app.close()
 
 
-def test_document_page_is_read_only_snapshot(tmp_path: Path) -> None:
+def test_document_page_shows_pinned_snapshot_and_judgment_forms(tmp_path: Path) -> None:
     catalog, gold_path, cache = _seed(tmp_path)
     app = ReviewApplication(catalog, gold_path, cache)
     status, _headers, body = _request(app, "/doc/R100/D100")
@@ -166,10 +169,11 @@ def test_document_page_is_read_only_snapshot(tmp_path: Path) -> None:
     assert "abc123" in page
     assert 'href="/doc/R100/D100/source#win-cover"' in page
     slot = page.split('id="judgment-slot"', 1)[1].split("</aside>", 1)[0]
-    assert "<" not in slot
-    assert "<form" not in page
-    assert "<button" not in page
-    assert "<input" not in page
+    assert "<form" in slot
+    assert 'name="verdict"' in slot
+    assert 'value="correct"' in slot
+    assert 'value="wrong"' in slot
+    assert 'value="na"' in slot
     app.close()
 
 
@@ -186,8 +190,9 @@ def test_source_is_sandboxed_and_blocks_external_resources(tmp_path: Path) -> No
     assert "default-src 'none'" in policy
     assert "script-src" not in policy or "'none'" in policy
     source = body.decode()
-    assert 'id="win-cover"' in source
-    assert 'id="win-opinion_letter"' in source
+    assert "표지 골드주식회사" in source
+    assert 'id="win-cover"' not in source
+    assert 'sandbox=""' not in source
     app.close()
 
 

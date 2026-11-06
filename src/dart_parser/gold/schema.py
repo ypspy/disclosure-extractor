@@ -107,4 +107,11 @@ MIGRATIONS: tuple[str, ...] = (
         PRIMARY KEY (extractor_version, rcept_no, dcm_no, bundle, subject)
     );
     """,
+    """
+    CREATE TABLE gold_run_extractors (
+        run_id TEXT PRIMARY KEY REFERENCES gold_runs(run_id),
+        extractor_version TEXT NOT NULL,
+        extractor_commit TEXT NOT NULL
+    );
+    """,
 )
