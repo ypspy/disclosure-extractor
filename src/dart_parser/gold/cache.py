@@ -4,12 +4,55 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 CACHE_ROOT = Path(r"C:\dev\dart-wrapper\data\gold_cache")
+
+_CHARSET_RE = re.compile(rb"charset\s*=\s*[\"']?\s*([A-Za-z0-9_\-]+)", re.IGNORECASE)
+_KOREAN_CHARSETS = {
+    "cp949": "cp949",
+    "ms949": "cp949",
+    "windows-949": "cp949",
+    "euc-kr": "euc-kr",
+    "euc_kr": "euc-kr",
+    "ks_c_5601-1987": "euc-kr",
+}
+
+
+@dataclass(frozen=True)
+class CachedHtml:
+    """캐시 HTML과, 인코딩을 확정하지 못했는지."""
+
+    text: str
+    encoding_uncertain: bool
+
+
+def read_cached_html(path: Path) -> CachedHtml:
+    """UTF-8로 읽고, 실패하면 meta charset의 cp949/euc-kr로 다시 읽는다."""
+    data = Path(path).read_bytes()
+    try:
+        return CachedHtml(data.decode("utf-8"), False)
+    except UnicodeDecodeError:
+        encoding = _korean_charset(data)
+        if encoding is not None:
+            try:
+                return CachedHtml(data.decode(encoding), False)
+            except UnicodeDecodeError:
+                pass
+        return CachedHtml(data.decode("utf-8", errors="replace"), True)
+
+
+def _korean_charset(data: bytes) -> str | None:
+    """앞부분 meta charset이 cp949 또는 euc-kr이면 그 인코딩 이름을 돌려준다."""
+    match = _CHARSET_RE.search(data[:8192])
+    if match is None:
+        return None
+    name = match.group(1).decode("ascii", errors="ignore").lower()
+    return _KOREAN_CHARSETS.get(name)
 
 
 def cache_dir(root: Path, rcept_no: str) -> Path:
@@ -85,11 +128,22 @@ def import_from_box(plan: CachePlan) -> int:
     return copied
 
 
-def load_section_html(
-    root: Path, rcept_no: str, entry: dict[str, object]
-) -> str | None:
-    """캐시에 있는 섹션 HTML만 읽는다. 파일이 없으면 None."""
+def _document_folder(root: Path, rcept_no: str, dcm_no: str | None) -> Path:
+    """접수번호 폴더. dcm_no 하위 폴더가 있으면 그 문서를 고른다."""
     folder = cache_dir(root, rcept_no)
+    if dcm_no and (folder / dcm_no).is_dir():
+        return folder / dcm_no
+    return folder
+
+
+def load_section_html(
+    root: Path,
+    rcept_no: str,
+    entry: dict[str, object],
+    dcm_no: str | None = None,
+) -> CachedHtml | None:
+    """캐시에 있는 섹션 HTML만 읽는다. 파일이 없으면 None."""
+    folder = _document_folder(root, rcept_no, dcm_no)
     if not folder.is_dir():
         return None
     ele_id = str(entry.get("ele_id") or "")
@@ -101,24 +155,31 @@ def load_section_html(
             toc = None
         filename = ""
         if isinstance(toc, dict):
-            raw = toc.get(ele_id) or toc.get("sections", {}).get(ele_id)
+            raw = toc.get(ele_id)
+            if raw is None:
+                sections = toc.get("sections")
+                raw = sections.get(ele_id) if isinstance(sections, dict) else None
             if isinstance(raw, str):
                 filename = raw
             elif isinstance(raw, dict):
-                filename = str(raw.get("file") or "")
+                marker = str(raw.get("dcm_no") or "")
+                if dcm_no and marker and marker != dcm_no:
+                    filename = ""
+                else:
+                    filename = str(raw.get("file") or "")
         if filename:
-            section = folder / filename
-            if section.is_file():
-                return section.read_text(encoding="utf-8")
+            section = (folder / filename).resolve()
+            if section.is_file() and section.is_relative_to(folder.resolve()):
+                return read_cached_html(section)
     if ele_id:
         needle = f'data-ele-id="{ele_id}"'
         for path in sorted(folder.glob("*.html")):
-            text = path.read_text(encoding="utf-8")
-            if needle in text or f"eleId={ele_id}" in text:
-                return text
+            loaded = read_cached_html(path)
+            if needle in loaded.text or f"eleId={ele_id}" in loaded.text:
+                return loaded
     main = folder / "main.html"
     if main.is_file() and not ele_id:
-        return main.read_text(encoding="utf-8")
+        return read_cached_html(main)
     return None
 
 
