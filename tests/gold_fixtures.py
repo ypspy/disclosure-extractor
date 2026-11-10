@@ -97,6 +97,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             entry_id TEXT PRIMARY KEY,
             rcept_no TEXT,
             dcm_no TEXT,
+            document_name TEXT,
             section_name TEXT,
             ele_id TEXT,
             dtd TEXT,
@@ -197,6 +198,7 @@ def _insert_fact(
     bs_id = f"{rcept_no}:{dcm_no}:bs"
     is_id = f"{rcept_no}:{dcm_no}:is"
     viewer = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}&dcmNo={dcm_no}"
+    document_name = "연결감사보고서" if fs_scope == "consolidated" else "감사보고서"
     for entry_id, section, ele in (
         (cover_id, "표지", "1"),
         (opinion_id, "감사의견", "2"),
@@ -207,31 +209,32 @@ def _insert_fact(
         conn.execute(
             """
             INSERT INTO entries (
-                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                entry_id, rcept_no, dcm_no, document_name, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (entry_id, rcept_no, dcm_no, section, ele, dtd, viewer),
+            (entry_id, rcept_no, dcm_no, document_name, section, ele, dtd, viewer),
         )
     if kam:
         conn.execute(
             """
             INSERT INTO entries (
-                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                entry_id, rcept_no, dcm_no, document_name, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (f"{rcept_no}:{dcm_no}:kam", rcept_no, dcm_no, kam, "9", dtd, viewer),
+            (f"{rcept_no}:{dcm_no}:kam", rcept_no, dcm_no, document_name, kam, "9", dtd, viewer),
         )
     if icfr_ok:
         conn.execute(
             """
             INSERT INTO entries (
-                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                entry_id, rcept_no, dcm_no, document_name, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"{rcept_no}:{dcm_no}:icfr",
                 rcept_no,
                 dcm_no,
+                document_name,
                 "내부회계관리제도에 대한 감사의견",
                 "6",
                 dtd,
@@ -242,13 +245,14 @@ def _insert_fact(
         conn.execute(
             """
             INSERT INTO entries (
-                entry_id, rcept_no, dcm_no, section_name, ele_id, dtd, viewer_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                entry_id, rcept_no, dcm_no, document_name, section_name, ele_id, dtd, viewer_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"{rcept_no}:{dcm_no}:sub",
                 rcept_no,
                 dcm_no,
+                document_name,
                 "종속기업",
                 "7",
                 dtd,

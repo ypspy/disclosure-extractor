@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from dart_parser.gold.audit_document import (
+    audit_document_consolidated_sql,
+    audit_document_predicate_sql,
+)
 from dart_parser.gold.db import catalog_file
 from dart_parser.gold.periods import assign_period, layout_era, period_dtd_mismatch
 from dart_parser.gold.subjects import (
@@ -20,17 +24,16 @@ from dart_parser.gold.subjects import (
 )
 from dart_parser.gold.v19_fields import status_attr
 
-POPULATION_SQL = """
+_AUDIT_PREDICATE = audit_document_predicate_sql("e.document_name")
+_AUDIT_CONSOLIDATED = audit_document_consolidated_sql("e.document_name")
+
+POPULATION_SQL = f"""
 SELECT
     d.rcept_no AS rcept_no,
     e.dcm_no AS dcm_no,
     MAX(d.report_type) AS source_report_type,
-    CASE
-        WHEN MAX(d.report_type) = 'F002'
-          OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
-        THEN 'consolidated'
-        ELSE 'separate'
-    END AS fs_scope,
+    MAX(CASE WHEN {_AUDIT_PREDICATE} THEN 1 ELSE 0 END) AS audit_hit,
+    MAX(CASE WHEN {_AUDIT_CONSOLIDATED} THEN 1 ELSE 0 END) AS audit_consolidated,
     '' AS opinion_resolved,
     MAX(d.rcept_dt) AS rcept_dt,
     MAX(d.year_end) AS year_end,
@@ -51,6 +54,7 @@ WHERE d.report_type IN ('F001', 'F002', 'A001')
   AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
   AND IFNULL(e.dcm_no, '') != ''
 GROUP BY d.rcept_no, e.dcm_no
+HAVING audit_hit = 1
 """
 
 _WINDOWS = (
@@ -222,7 +226,7 @@ def _pop_from_sql(record: sqlite3.Row) -> PopRow | None:
     if period == "OUT":
         return None
     report_type = record["source_report_type"] or ""
-    scope = "consolidated" if record["fs_scope"] == "consolidated" else "separate"
+    scope = "consolidated" if int(record["audit_consolidated"] or 0) else "separate"
     form = "attached" if report_type == "A001" else "standalone"
     opinion = (record["opinion_resolved"] or "").strip()
     nonclean = 0 if opinion in {"", "unqualified"} else 1
