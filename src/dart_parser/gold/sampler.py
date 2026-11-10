@@ -725,12 +725,7 @@ def oversample(
             d.rcept_no AS rcept_no,
             e.dcm_no AS dcm_no,
             MAX(d.report_type) AS source_report_type,
-            CASE
-                WHEN MAX(d.report_type) = 'F002'
-                  OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
-                THEN 'consolidated'
-                ELSE 'separate'
-            END AS fs_scope,
+            MAX(CASE WHEN {_AUDIT_CONSOLIDATED} THEN 1 ELSE 0 END) AS audit_consolidated,
             MAX(d.rcept_dt) AS rcept_dt,
             MAX(d.year_end) AS year_end,
             MAX(d.correction_type) AS correction_type,
@@ -743,6 +738,7 @@ def oversample(
         WHERE d.report_type IN ('F001', 'F002', 'A001')
           AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
           AND IFNULL(e.dcm_no, '') != ''
+          AND {_AUDIT_PREDICATE}
           AND {section_sql}
           AND NOT EXISTS (
               SELECT 1 FROM gold_samples s
@@ -797,10 +793,16 @@ def oversample(
         weight = (len(rows) / len(picked)) if picked else 0.0
         for record in picked:
             next_order += 1
+            scope = (
+                "consolidated"
+                if int(record["audit_consolidated"] or 0)
+                else "separate"
+            )
             meta = {
                 "oversample_for": f"{bundle}:{subject}",
                 "field_weight": weight,
                 "catalog_as_of": as_of,
+                "scope": scope,
                 "dtd": record["dtd"] or "",
                 "fye": record["year_end"] or "",
                 "layout_era": layout_era(record["year_end"]),
