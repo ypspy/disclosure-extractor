@@ -16,7 +16,10 @@ def test_amount_uses_the_chosen_scale_and_to_number() -> None:
         "unit_scale": 1_000_000,
         "value_won": 19_506_000_000.0,
     }
-    assert parse_click("accounts", "operating_income@current", "△1,234", unit_scale=1)["value"] == -1234.0
+    assert (
+        parse_click("accounts", "operating_income@current", "△1,234", unit_scale=1)["value"]
+        == -1234.0
+    )
     assert parse_click("accounts", "revenue@current", "19,506", unit_scale=None) is None
     assert parse_click("accounts", "revenue@current", "없음", unit_scale=1) is None
     assert parse_click("accounts", "revenue@current", "  ", unit_scale=1) is None
@@ -53,7 +56,10 @@ def test_dates_period_and_counts() -> None:
 def test_icfr_needs_one_engagement_before_an_opinion() -> None:
     assert parse_click("icfr", "engagement", "내부회계관리제도 감사") == "audit"
     assert parse_click("icfr", "engagement", "감사 및 검토") is None
-    assert parse_click("icfr", "opinion", "중요한 취약점", icfr_engagement="review") == "중요한 취약점"
+    assert (
+        parse_click("icfr", "opinion", "중요한 취약점", icfr_engagement="review")
+        == "중요한 취약점"
+    )
     assert parse_click("icfr", "opinion", "한정", icfr_engagement="audit") is None
     assert parse_click("icfr", "opinion", "적정", icfr_engagement=None) is None
 
