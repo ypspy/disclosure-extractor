@@ -167,9 +167,7 @@ def parse_click(
             return None
         return {"start": found[0], "end": found[1]}
     if bundle == "icfr" and subject == "engagement":
-        found = _hits(cleaned, ("검토", "감사"))
-        chosen = _one(found)
-        return {"감사": "audit", "검토": "review"}.get(chosen or "")
+        return _icfr_engagement(cleaned)
     if bundle == "icfr" and subject == "opinion":
         allowed = {
             "audit": ("부적정", "거절", "적정"),
@@ -239,6 +237,15 @@ def _hits(text: str, phrases: tuple[str, ...]) -> list[str]:
                 hits.append(phrase)
             start = index + len(phrase)
     return hits
+
+
+def _icfr_engagement(text: str) -> str | None:
+    """감사인·감사보고서·감사위원회 안의 감사는 업무로 세지 않는다."""
+    masked = text
+    for token in ("감사위원회", "감사보고서", "감사인"):
+        masked = masked.replace(token, " ")
+    chosen = _one(_hits(masked, ("검토", "감사")))
+    return {"감사": "audit", "검토": "review"}.get(chosen or "")
 
 
 def _one(found: list[str]) -> str | None:

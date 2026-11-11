@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+
+import pytest
 
 from dart_parser.gold.capture_store import (
     clear_capture,
@@ -92,3 +95,66 @@ def test_notes_and_rounds_append(tmp_path) -> None:
     items = json.loads(load_captures(conn, "R", "D")[("communications", "items")]["value"])
     assert [item["round"] for item in items] == [1, 2]
     assert items[0]["date"] == "2017-03-02"
+
+
+def test_notes_reject_a_duplicate_and_drop_one_title(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    save_capture(conn, "R", "D", "notes_toc", "value", "일반사항")
+    assert save_capture(conn, "R", "D", "notes_toc", "value", "  일반사항 ")
+    save_capture(conn, "R", "D", "notes_toc", "value", "재고자산")
+    notes = json.loads(load_captures(conn, "R", "D")[("notes_toc", "value")]["value"])
+    assert notes == {"count": 2, "titles": ["일반사항", "재고자산"]}
+    from dart_parser.gold.capture_store import remove_list_item
+
+    assert remove_list_item(conn, "R", "D", "notes_toc", "value", 0)
+    notes = json.loads(load_captures(conn, "R", "D")[("notes_toc", "value")]["value"])
+    assert notes == {"count": 1, "titles": ["재고자산"]}
+    history = conn.execute(
+        "SELECT value, action FROM gold_capture_history ORDER BY rowid"
+    ).fetchall()
+    assert json.loads(history[-1][0])["titles"] == ["일반사항", "재고자산"]
+    assert history[-1][1] == "update"
+
+
+def test_communication_rounds_skip_duplicates_and_renumber(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    save_capture(conn, "R", "D", "communications", "items", "2017년 3월 2일 회의")
+    assert save_capture(conn, "R", "D", "communications", "items", "  2017년 3월 2일 회의 ")
+    save_capture(conn, "R", "D", "communications", "items", "둘째 회의")
+    from dart_parser.gold.capture_store import remove_list_item
+
+    assert remove_list_item(conn, "R", "D", "communications", "items", 0)
+    items = json.loads(load_captures(conn, "R", "D")[("communications", "items")]["value"])
+    assert [item["round"] for item in items] == [1]
+    assert items[0]["raw"] == "둘째 회의"
+
+
+def test_overwrite_and_clear_keep_history(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    save_capture(conn, "R", "D", "company_name", "value", "가나")
+    save_capture(conn, "R", "D", "company_name", "value", "다라")
+    clear_capture(conn, "R", "D", "company_name", "value")
+    history = conn.execute(
+        "SELECT value, action FROM gold_capture_history ORDER BY rowid"
+    ).fetchall()
+    assert [json.loads(row[0]) for row in history] == ["가나", "다라"]
+    assert [row[1] for row in history] == ["update", "clear"]
+    assert load_captures(conn, "R", "D") == {}
+
+
+def test_failed_overwrite_rolls_back_capture_and_history(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    save_capture(conn, "R", "D", "company_name", "value", "가나")
+    conn.execute(
+        """
+        CREATE TRIGGER boom BEFORE UPDATE ON gold_captures
+        BEGIN
+            SELECT RAISE(ABORT, 'boom');
+        END
+        """
+    )
+    with pytest.raises(sqlite3.Error):
+        save_capture(conn, "R", "D", "company_name", "value", "다라")
+    row = load_captures(conn, "R", "D")[("company_name", "value")]
+    assert json.loads(row["value"]) == "가나"
+    assert conn.execute("SELECT count(*) FROM gold_capture_history").fetchone()[0] == 0

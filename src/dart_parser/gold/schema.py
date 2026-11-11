@@ -135,4 +135,18 @@ CREATE TABLE gold_capture_units (
     PRIMARY KEY (rcept_no, dcm_no, unit_group)
 );
 """,
+    """
+CREATE TABLE gold_capture_history (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    value TEXT,
+    evidence TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    superseded_at TEXT NOT NULL
+);
+""",
 )
