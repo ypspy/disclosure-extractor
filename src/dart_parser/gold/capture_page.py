@@ -35,10 +35,20 @@ def render_capture_page(
     *,
     miss_bundle: str = "",
     miss_subject: str = "",
+    encoding_uncertain: bool = False,
+    dcm_ambiguous: bool = False,
+    cache_missing: bool = False,
+    recorded: int = 0,
+    row_total: int = 0,
+    period_done: int = 0,
+    period_total: int = 0,
+    period: str = "",
+    toc: Sequence[tuple[str, str]] = (),
 ) -> str:
     """왼쪽은 공시 shadow root, 오른쪽은 입수 행이다."""
     title = _title(rcept_no, dcm_no, company, report, filed)
     capture_url = _path(rcept_no, dcm_no, "capture")
+    cleaned = prepare_disclosure_html(filing_html)
     row_column = _rows(
         rows,
         saved,
@@ -58,11 +68,15 @@ def render_capture_page(
         f"<p>{html.escape(filed)}</p>"
         f"<p>{html.escape(rcept_no)}</p>"
         f"<p>{html.escape(dcm_no)}</p>"
-        f"<p>표시 {len(saved)}건</p>"
+        f'<p id="doc-progress">기록 {recorded}/{row_total}</p>'
+        f'<p id="period-progress">완료 {period_done}/{period_total}</p>'
+        f"{_warnings(encoding_uncertain, dcm_ambiguous, cache_missing)}"
+        f"{_complete_form(rcept_no, dcm_no, token)}"
+        f"{_next_link(period)}"
         "</header>"
     )
     body = (
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
         f"<title>{html.escape(title)}</title>"
         "<style>"
         "body{margin:0;font-family:sans-serif}"
@@ -72,11 +86,13 @@ def render_capture_page(
         "form{border-top:1px solid #ccc;padding:0.4rem}"
         "</style></head><body>"
         f"{header}"
+        f"{_toc_nav(toc)}"
         '<div class="layout">'
         '<div id="filing"></div>'
         f'<div class="rows">{row_column}</div>'
         "</div>"
-        f"{_script(capture_url, prepare_disclosure_html(filing_html))}"
+        f"{_data(capture_url, cleaned)}"
+        '<script src="/static/capture.js"></script>'
         "</body></html>"
     )
     return body
@@ -173,6 +189,8 @@ def _row_form(
         '<button type="submit" name="status" value="not_in_regime">제도상 없음</button>'
         '<button type="submit" name="status" value="clear">지우기</button>'
         f"{shown}{miss}"
+        f"{_hint(row)}"
+        '<p class="row-error"></p>'
         "</form>"
     )
 
@@ -228,50 +246,68 @@ def _block(text: str) -> str:
     return "<p>" + "<br>".join(html.escape(line) for line in text.split("\n")) + "</p>"
 
 
+def _hint(row: CaptureRow) -> str:
+    if row.bundle != "going_concern":
+        return ""
+    return "<p>의견 근거만 있거나, 전기 인용만 있거나, 청산기준 강조만 있으면 0입니다.</p>"
+
+
+def _warnings(encoding_uncertain: bool, dcm_ambiguous: bool, cache_missing: bool) -> str:
+    parts: list[str] = []
+    if encoding_uncertain:
+        parts.append('<p id="encoding-check">인코딩을 확정하지 못했습니다.</p>')
+    if dcm_ambiguous:
+        parts.append('<p id="dcm-warning">문서번호를 구분할 수 없습니다.</p>')
+    if cache_missing:
+        parts.append('<p id="cache-missing">캐시가 없습니다.</p>')
+    return "".join(parts)
+
+
+def _complete_form(rcept_no: str, dcm_no: str, token: str) -> str:
+    action = html.escape(_path(rcept_no, dcm_no, "complete"), quote=True)
+    return (
+        f'<form method="post" action="{action}">'
+        f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
+        '<button type="submit">완료</button>'
+        "</form>"
+    )
+
+
+def _next_link(period: str) -> str:
+    if not period:
+        return ""
+    return f'<p><a href="/next?period={quote(period)}">다음 문서</a></p>'
+
+
+def _toc_nav(toc: Sequence[tuple[str, str]]) -> str:
+    if not toc:
+        return ""
+    links = [
+        (
+            f'<a href="#{html.escape(ident, quote=True)}" '
+            f'data-scroll="{html.escape(ident, quote=True)}">{html.escape(title)}</a>'
+        )
+        for ident, title in toc
+    ]
+    return f'<nav id="filing-toc">{"".join(links)}</nav>'
+
+
+def html_json(value: Any) -> str:
+    """HTML에 넣을 JSON. `<`, `>`, `&`, U+2028, U+2029는 이스케이프한다."""
+    raw = json.dumps(value, ensure_ascii=False)
+    return (
+        raw.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _path(rcept_no: str, dcm_no: str, action: str) -> str:
     return f"/doc/{quote(rcept_no)}/{quote(dcm_no)}/{action}"
 
 
-def _script(capture_url: str, filing_html: str) -> str:
-    payload = json.dumps(filing_html, ensure_ascii=False).replace("<", "\\u003c")
-    url = json.dumps(capture_url)
-    return (
-        "<script>\n"
-        f"const captureUrl = {url};\n"
-        f"const filingHtml = {payload};\n"
-        "const host = document.getElementById('filing');\n"
-        "const root = host.attachShadow({mode: 'open'});\n"
-        "root.innerHTML = filingHtml;\n"
-        "root.addEventListener('click', function (event) {\n"
-        "  const chosen = selectedRow();\n"
-        "  if (!chosen) return;\n"
-        "  event.preventDefault();\n"
-        "  const body = new URLSearchParams();\n"
-        "  body.set('token', chosen.token.value);\n"
-        "  body.set('bundle', chosen.bundle.value);\n"
-        "  body.set('subject', chosen.subject.value);\n"
-        "  body.set('text', event.target.textContent || '');\n"
-        "  fetch(captureUrl, {\n"
-        "    method: 'POST',\n"
-        "    headers: {'Content-Type': 'application/x-www-form-urlencoded'},\n"
-        "    body: body\n"
-        "  }).then(function (response) {\n"
-        "    window.location.assign(response.url || captureUrl);\n"
-        "  });\n"
-        "});\n"
-        "function selectedRow() {\n"
-        "  const forms = document.querySelectorAll('form.capture-row');\n"
-        "  for (let i = 0; i < forms.length; i++) {\n"
-        "    if (forms[i].row && forms[i].row.checked) return forms[i];\n"
-        "  }\n"
-        "  return null;\n"
-        "}\n"
-        "document.addEventListener('change', function (event) {\n"
-        "  if (!event.target || event.target.name !== 'row') return;\n"
-        "  const forms = document.querySelectorAll('form.capture-row');\n"
-        "  for (let i = 0; i < forms.length; i++) {\n"
-        "    if (forms[i].row && forms[i].row !== event.target) forms[i].row.checked = false;\n"
-        "  }\n"
-        "});\n"
-        "</script>"
-    )
+def _data(capture_url: str, filing_html: str) -> str:
+    payload = html_json({"captureUrl": capture_url, "filingHtml": filing_html})
+    return f'<script id="capture-data" type="application/json">{payload}</script>'

@@ -5,12 +5,17 @@ from __future__ import annotations
 import io
 import json
 import re
+import socket
 import sqlite3
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlencode
 from wsgiref.util import setup_testing_defaults
 
+import pytest
+
 from dart_parser.gold.app import ReviewApplication
+from dart_parser.gold.capture import capture_rows
 from dart_parser.gold.db import migrate, open_gold
 from gold_fixtures import make_catalog
 
@@ -160,7 +165,8 @@ def test_document_page_is_capture_without_an_iframe(tmp_path: Path) -> None:
     assert "자산총계 · 당기" in page
     assert "R100" in page and "D100" in page
     assert 'name="verdict"' not in page
-    assert "event.preventDefault()" in page
+    assert '<script src="/static/capture.js">' in page
+    assert "function (" not in page
     assert page.count('<select name="unit_scale"><option value="" selected></option>') == 2
     app.close()
 
@@ -246,4 +252,233 @@ def test_absent_clear_and_rejected_requests(tmp_path: Path) -> None:
     assert bad.startswith("400")
     missing, _headers, _body = _request(app, "GET", "/doc/R100/D100/source")
     assert missing.startswith("404")
+    app.close()
+
+
+def test_html_responses_send_a_content_security_policy(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, headers, body = _request(app, "GET", "/doc/R100/D100")
+    policy = headers["Content-Security-Policy"]
+    assert "default-src 'none'" in policy
+    assert "script-src 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
+    assert headers["Referrer-Policy"] == "no-referrer"
+    page = body.decode()
+    assert '<script src="/static/capture.js">' in page
+    assert "function (" not in page
+    status, script_headers, script = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    assert script_headers["Content-Type"] == "text/javascript"
+    assert script_headers["X-Content-Type-Options"] == "nosniff"
+    assert b"event.preventDefault()" in script
+    missing, _headers, _body = _request(app, "GET", "/static/other.js")
+    assert missing.startswith("404")
+    app.close()
+
+
+def test_pages_do_not_download_sample_or_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args, **_kwargs):
+        raise AssertionError("network or sampling")
+
+    monkeypatch.setattr(socket, "create_connection", boom)
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr("dart_parser.gold.sampler.build_sample", boom)
+    monkeypatch.setattr("dart_parser.gold.sampler.oversample", boom)
+    monkeypatch.setattr("dart_parser.gold.snapshots.capture", boom)
+    app = _build(tmp_path)
+    list_status, _headers, _body = _request(app, "GET", "/")
+    doc_status, _headers, _body = _request(app, "GET", "/doc/R100/D100")
+    post_status, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "가나"},
+    )
+    assert list_status == "200 OK"
+    assert doc_status == "200 OK"
+    assert post_status.startswith("303")
+    assert not (tmp_path / "cache" / "R100").exists()
+    app.close()
+
+
+def test_missing_cache_is_marked_and_not_downloaded(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert status == "200 OK"
+    assert 'id="cache-missing"' in page
+    assert not (tmp_path / "cache" / "R100").exists()
+    app.close()
+
+
+def test_encoding_and_ambiguous_document_warnings(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    folder = tmp_path / "cache" / "R100"
+    folder.mkdir(parents=True)
+    (folder / "main.html").write_bytes(b"\xff\xfe<p>\xb0\xa1</p>")
+    (folder / "toc.json").write_text("{}", encoding="utf-8")
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert 'id="encoding-check"' in page
+    assert 'id="dcm-warning"' not in page
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_samples (
+            run_id, rcept_no, dcm_no, period, stratum, stratum_weight, sample_hash,
+            mode, role, queue_order, status, meta
+        ) VALUES (
+            'run', 'R100', 'D200', 'P7', 'listed', 1, 'h2', 'prefill', 'main', 2, 'todo', '{}'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    _status, _headers, warned = _request(app, "GET", "/doc/R100/D100")
+    assert 'id="dcm-warning"' in warned.decode()
+    status, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "가나"},
+    )
+    assert status.startswith("409")
+    unit, _headers, _body = _post(
+        app, "/doc/R100/D100/unit", {"unit_group": "bs", "unit_scale": "1"}
+    )
+    assert unit.startswith("409")
+    done, _headers, _body = _post(app, "/doc/R100/D100/complete", {})
+    assert done.startswith("409")
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    assert conn.execute("SELECT count(*) FROM gold_captures").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM gold_capture_units").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status FROM gold_samples WHERE dcm_no = 'D100'"
+    ).fetchone()[0] == "todo"
+    conn.close()
+    app.close()
+
+
+def test_full_filing_is_shown_without_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args, **_kwargs):
+        raise AssertionError("evidence")
+
+    monkeypatch.setattr("dart_parser.gold.evidence.evidence_for", boom)
+    app = _build(tmp_path)
+    folder = tmp_path / "cache" / "R100"
+    folder.mkdir(parents=True)
+    (folder / "main.html").write_text(
+        "<h2>주석</h2><p>표지 밖 고유문장</p>", encoding="utf-8"
+    )
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert "표지 밖 고유문장" in page
+    assert "골드주식회사" not in page
+    assert "0.1.0" not in page
+    assert "abc123" not in page
+    assert 'id="filing-toc"' in page
+    assert "주석" in page
+    assert "data-scroll=" in page
+    app.close()
+
+
+def test_complete_lists_missing_rows_then_marks_done(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _post(app, "/doc/R100/D100/complete", {})
+    assert status.startswith("400")
+    page = body.decode()
+    assert 'id="missing-rows"' in page
+    assert "회사명" in page
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    for row in capture_rows():
+        conn.execute(
+            """
+            INSERT INTO gold_captures (
+                rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+            ) VALUES ('R100', 'D100', ?, ?, 'not_applicable', NULL, '', 't')
+            """,
+            (row.bundle, row.subject),
+        )
+    conn.commit()
+    conn.close()
+    done, _headers, _body = _post(app, "/doc/R100/D100/complete", {})
+    assert done.startswith("303")
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    row = conn.execute(
+        "SELECT status, finished_at FROM gold_samples WHERE dcm_no = 'D100'"
+    ).fetchone()
+    assert row[0] == "done"
+    assert row[1]
+    conn.close()
+    app.close()
+
+
+def test_next_resumes_in_progress_without_writing(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_samples (
+            run_id, rcept_no, dcm_no, period, stratum, stratum_weight, sample_hash,
+            mode, role, queue_order, status, meta
+        ) VALUES
+            ('run', 'R200', 'D200', 'P7', 'listed', 1, 'h2', 'prefill', 'main', 0, 'todo', '{}'),
+            ('run', 'R300', 'D300', 'P7', 'listed', 1, 'h3', 'prefill', 'main', 2,
+             'in_progress', '{}'),
+            ('run', 'R400', 'D400', 'P7', 'listed', 1, 'h4', 'prefill', 'reserve', 3, 'todo', '{}'),
+            ('run', 'R500', 'D500', 'P7', 'listed', 1, 'h5', 'prefill', 'main', 4, 'done', '{}')
+        """
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT rcept_no, status, started_at FROM gold_samples ORDER BY rcept_no"
+    ).fetchall()
+    conn.close()
+    status, headers, _body = _request(app, "GET", "/next", "period=P7")
+    assert status.startswith("303")
+    assert headers["Location"] == "/doc/R300/D300"
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    after = conn.execute(
+        "SELECT rcept_no, status, started_at FROM gold_samples ORDER BY rcept_no"
+    ).fetchall()
+    conn.close()
+    assert after == before
+    app.close()
+
+
+def test_first_capture_marks_the_sample_in_progress(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "가나"},
+    )
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    status, started = conn.execute(
+        "SELECT status, started_at FROM gold_samples WHERE dcm_no = 'D100'"
+    ).fetchone()
+    assert status == "in_progress"
+    assert started
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "다라"},
+    )
+    again = conn.execute(
+        "SELECT started_at FROM gold_samples WHERE dcm_no = 'D100'"
+    ).fetchone()[0]
+    conn.close()
+    assert again == started
+    app.close()
+
+
+def test_going_concern_rule_is_on_the_row(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert "의견 근거만 있거나, 전기 인용만 있거나, 청산기준 강조만 있으면 0입니다." in page
+    assert 'id="doc-progress">기록 0/' in page
+    assert 'id="period-progress">완료 0/1' in page
     app.close()

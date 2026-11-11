@@ -14,7 +14,9 @@ import os
 import re
 import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -22,23 +24,29 @@ from wsgiref.simple_server import make_server
 
 from dart_parser.gold.cache import CACHE_ROOT, cache_dir, load_section_html
 from dart_parser.gold.capture import capture_rows, known_subject
+from dart_parser.gold.capture_html import heading_toc, prepare_disclosure_html, toc_from_cache
 from dart_parser.gold.capture_page import render_capture_page
 from dart_parser.gold.capture_store import (
     clear_capture,
     load_captures,
     load_units,
+    remove_list_item,
     save_capture,
     set_capture_status,
     set_unit,
 )
 from dart_parser.gold.db import migrate, open_gold
-from dart_parser.gold.evidence import evidence_for, section_windows
-from dart_parser.gold.subjects import BUNDLE_KEYS
 
 LOOPBACK = "127.0.0.1"
 _ID = re.compile(r"^[A-Za-z0-9]+$")
 _MAX_BODY = 100_000
 _ABSENT = frozenset({"not_applicable", "not_in_regime"})
+_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+    "img-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; "
+    "object-src 'none'; frame-ancestors 'none'"
+)
+_CAPTURE_JS = files("dart_parser.gold").joinpath("static/capture.js").read_bytes()
 
 
 def bind_host(host: str) -> str:
@@ -70,6 +78,7 @@ class SourceDocument:
     html: str | None
     encoding_uncertain: bool
     dcm_ambiguous: bool
+    toc: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 class ReviewStore:
@@ -156,38 +165,20 @@ class ReviewStore:
         return None
 
     def load_disclosure(self, rcept_no: str, dcm_no: str) -> SourceDocument:
-        """섹션 HTML을 이어 붙인다. 앵커는 붙이지 않는다."""
+        """캐시에 있는 문서 전체 HTML을 읽는다. 앵커는 붙이지 않는다."""
         ambiguous = self._dcm_ambiguous(rcept_no, dcm_no)
-        pieces: list[str] = []
-        seen: set[str] = set()
-        uncertain = False
-        identity = {"rcept_no": rcept_no, "dcm_no": dcm_no}
-        for bundle in BUNDLE_KEYS:
-            if not _windows(bundle):
-                continue
-            for item in _evidence(self.conn, identity, bundle):
-                loaded = load_section_html(
-                    self.cache_root,
-                    rcept_no,
-                    {"ele_id": item.ele_id},
-                    dcm_no=dcm_no,
-                )
-                if loaded is None:
-                    continue
-                uncertain = uncertain or loaded.encoding_uncertain
-                key = item.ele_id or loaded.text
-                if key in seen:
-                    continue
-                seen.add(key)
-                pieces.append(loaded.text)
-        if not pieces:
-            loaded = load_section_html(self.cache_root, rcept_no, {}, dcm_no=dcm_no)
-            if loaded is not None:
-                pieces.append(loaded.text)
-                uncertain = uncertain or loaded.encoding_uncertain
-        if not pieces:
+        loaded = load_section_html(self.cache_root, rcept_no, {}, dcm_no=dcm_no)
+        if loaded is None:
             return SourceDocument(None, False, ambiguous)
-        return SourceDocument("\n".join(pieces), uncertain, ambiguous)
+        cleaned = prepare_disclosure_html(loaded.text)
+        folder = _document_folder(self.cache_root, rcept_no, dcm_no)
+        listed = toc_from_cache(folder / "toc.json")
+        if listed is None:
+            cleaned, headings = heading_toc(cleaned)
+            toc = tuple(headings)
+        else:
+            toc = tuple(listed)
+        return SourceDocument(cleaned, loaded.encoding_uncertain, ambiguous, toc)
 
     def _dcm_ambiguous(self, rcept_no: str, dcm_no: str) -> bool:
         """캐시가 문서 번호를 가리지 못하고 접수번호에 문서가 둘 이상이면 True."""
@@ -204,6 +195,38 @@ class ReviewStore:
         ).fetchone()
         return count is not None and int(count[0]) > 1
 
+    def period_progress(self, period: str) -> tuple[int, int]:
+        """이 기간의 완료 문서 수와 전체 문서 수."""
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0),
+                   COUNT(*)
+            FROM gold_samples
+            WHERE period = ?
+            """,
+            (period,),
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
+    def next_sample(self, period: str) -> tuple[str, str] | None:
+        """이어 할 문서를 고른다. 쓰지 않는다."""
+        row = self.conn.execute(
+            """
+            SELECT rcept_no, dcm_no
+            FROM gold_samples
+            WHERE period = ?
+              AND role IN ('main', 'oversample')
+              AND status NOT IN ('done', 'excluded', 'skipped')
+            ORDER BY CASE WHEN status = 'in_progress' THEN 0 ELSE 1 END,
+                     queue_order, rcept_no
+            LIMIT 1
+            """,
+            (period,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["rcept_no"]), str(row["dcm_no"])
+
 
 class ReviewApplication:
     """문서 목록과 입수 저장."""
@@ -219,10 +242,16 @@ class ReviewApplication:
         method = environ.get("REQUEST_METHOD", "GET")
         parts = [part for part in (environ.get("PATH_INFO") or "/").split("/") if part]
         query = parse_qs(environ.get("QUERY_STRING") or "")
+        if parts[:1] == ["static"]:
+            if method == "GET" and parts == ["static", "capture.js"]:
+                return _javascript(start_response)
+            return _html(start_response, "404 Not Found", "페이지가 없습니다.")
+        if parts == ["next"] and method == "GET":
+            return _next_document(self, start_response, query)
         if (
             len(parts) == 4
             and parts[0] == "doc"
-            and parts[3] in {"capture", "unit"}
+            and parts[3] in {"capture", "unit", "complete"}
             and _safe_id(parts[1])
             and _safe_id(parts[2])
         ):
@@ -235,6 +264,8 @@ class ReviewApplication:
                 )
             if parts[3] == "capture":
                 return _post_capture(self, environ, start_response, parts[1], parts[2])
+            if parts[3] == "complete":
+                return _post_complete(self, environ, start_response, parts[1], parts[2])
             return _post_unit(self, environ, start_response, parts[1], parts[2])
         if method != "GET":
             return _html(
@@ -287,20 +318,6 @@ def _object(raw: str | None) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     return {}
-
-
-def _windows(bundle: str) -> tuple[str, ...]:
-    try:
-        return section_windows(bundle)
-    except KeyError:
-        return ()
-
-
-def _evidence(conn: sqlite3.Connection, snapshot: dict[str, Any], bundle: str) -> list[Any]:
-    try:
-        return list(evidence_for(conn, snapshot, bundle))
-    except sqlite3.Error:
-        return []
 
 
 def _toc_names_dcm(path: Path) -> bool:
@@ -386,6 +403,8 @@ def _html(
         ("Content-Type", "text/html; charset=utf-8"),
         ("Content-Length", str(len(data))),
         ("X-Content-Type-Options", "nosniff"),
+        ("Content-Security-Policy", _CSP),
+        ("Referrer-Policy", "no-referrer"),
     ]
     if extra:
         headers.extend(extra)
@@ -444,19 +463,33 @@ def _capture_document(
         return None
     source = app.store.load_disclosure(rcept_no, dcm_no)
     company, report, filed = _filing_meta(app.store, rcept_no)
+    sample = app.store.sample(rcept_no, dcm_no)
+    assert sample is not None
+    saved = load_captures(app.store.conn, rcept_no, dcm_no)
+    rows = capture_rows()
+    period_done, period_total = app.store.period_progress(str(sample["period"]))
     return render_capture_page(
         rcept_no,
         dcm_no,
         app.token,
         source.html or "",
-        capture_rows(),
-        load_captures(app.store.conn, rcept_no, dcm_no),
+        rows,
+        saved,
         load_units(app.store.conn, rcept_no, dcm_no),
         company,
         report,
         filed,
         miss_bundle=_one(query, "miss_bundle"),
         miss_subject=_one(query, "miss_subject"),
+        encoding_uncertain=source.encoding_uncertain,
+        dcm_ambiguous=source.dcm_ambiguous,
+        cache_missing=source.html is None,
+        recorded=len(saved),
+        row_total=len(rows),
+        period_done=period_done,
+        period_total=period_total,
+        period=str(sample["period"]),
+        toc=source.toc,
     )
 
 
@@ -496,12 +529,25 @@ def _post_capture(
         return _reject(start_response)
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
+    if blocked is not None:
+        return blocked
     bundle = _one(form, "bundle")
     subject = _one(form, "subject")
     if not known_subject(bundle, subject):
         return _html(start_response, "400 Bad Request", "항목이 아닙니다.")
     status = _one(form, "status")
     conn = app.store.conn
+    if status in {"remove_title", "remove_item"}:
+        target = (
+            ("notes_toc", "value") if status == "remove_title" else ("communications", "items")
+        )
+        if (bundle, subject) != target:
+            return _html(start_response, "400 Bad Request", "항목이 아닙니다.")
+        index = _index(_one(form, "index"))
+        if index is None or not remove_list_item(conn, rcept_no, dcm_no, bundle, subject, index):
+            return _html(start_response, "400 Bad Request", "지우지 못했습니다.")
+        return _see_other(start_response, rcept_no, dcm_no)
     if status in _ABSENT:
         if not set_capture_status(conn, rcept_no, dcm_no, bundle, subject, status):
             return _html(start_response, "400 Bad Request", "저장하지 못했습니다.")
@@ -537,11 +583,109 @@ def _post_unit(
         return _reject(start_response)
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
+    if blocked is not None:
+        return blocked
     scale = _unit_scale(_one(form, "unit_scale"))
     group = _one(form, "unit_group")
     if scale is None or not set_unit(app.store.conn, rcept_no, dcm_no, group, scale):
         return _html(start_response, "400 Bad Request", "단위가 아닙니다.")
     return _see_other(start_response, rcept_no, dcm_no)
+
+
+def _index(raw: str) -> int | None:
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _ambiguous(
+    app: ReviewApplication,
+    rcept_no: str,
+    dcm_no: str,
+    start_response: Any,
+) -> list[bytes] | None:
+    if not app.store.load_disclosure(rcept_no, dcm_no).dcm_ambiguous:
+        return None
+    return _html(start_response, "409 Conflict", "문서번호를 구분할 수 없습니다.")
+
+
+def _post_complete(
+    app: ReviewApplication,
+    environ: dict[str, Any],
+    start_response: Any,
+    rcept_no: str,
+    dcm_no: str,
+) -> list[bytes]:
+    if not _host_allowed(environ) or not _origin_allowed(environ):
+        return _reject(start_response)
+    form = _form_body(environ)
+    if not _token_ok(app.token, _one(form, "token")):
+        return _reject(start_response)
+    if app.store.sample(rcept_no, dcm_no) is None:
+        return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
+    if blocked is not None:
+        return blocked
+    saved = load_captures(app.store.conn, rcept_no, dcm_no)
+    missing = [
+        row.label
+        for row in capture_rows()
+        if (row.bundle, row.subject) not in saved
+    ]
+    if missing:
+        items = "".join(f"<li>{html.escape(name)}</li>" for name in missing)
+        return _html(
+            start_response,
+            "400 Bad Request",
+            f'<ul id="missing-rows">{items}</ul>',
+        )
+    app.store.conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'done', finished_at = ?
+        WHERE rcept_no = ? AND dcm_no = ?
+          AND status NOT IN ('excluded', 'skipped')
+        """,
+        (datetime.now(UTC).isoformat(), rcept_no, dcm_no),
+    )
+    app.store.conn.commit()
+    return _see_other(start_response, rcept_no, dcm_no)
+
+
+def _next_document(
+    app: ReviewApplication,
+    start_response: Any,
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    period = _one(query, "period")
+    if not period:
+        return _html(start_response, "400 Bad Request", "기간이 없습니다.")
+    found = app.store.next_sample(period)
+    if found is None:
+        return _html(start_response, "404 Not Found", "다음 문서가 없습니다.")
+    rcept_no, dcm_no = found
+    location = f"/doc/{quote(rcept_no)}/{quote(dcm_no)}"
+    return _html(start_response, "303 See Other", "다음 문서입니다.", [("Location", location)])
+
+
+def _javascript(start_response: Any) -> list[bytes]:
+    start_response(
+        "200 OK",
+        [
+            ("Content-Type", "text/javascript"),
+            ("Content-Length", str(len(_CAPTURE_JS))),
+            ("X-Content-Type-Options", "nosniff"),
+        ],
+    )
+    return [_CAPTURE_JS]
+
+
+def _document_folder(root: Path, rcept_no: str, dcm_no: str) -> Path:
+    folder = cache_dir(root, rcept_no)
+    if dcm_no and (folder / dcm_no).is_dir():
+        return folder / dcm_no
+    return folder
 
 
 def _unit_scale(raw: str) -> int | None:

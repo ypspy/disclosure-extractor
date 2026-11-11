@@ -1,12 +1,82 @@
-"""공시 HTML을 왼쪽 영역에 넣기 전에 실행 요소를 뺀다."""
+"""공시 HTML을 허용 목록으로 정리한다."""
 
 from __future__ import annotations
 
 import html
+import json
 from html.parser import HTMLParser
+from pathlib import Path
 
-_DROP = frozenset({"script", "iframe"})
-_SCRIPT_URL_ATTRS = frozenset({"action", "formaction", "href", "src"})
+_KEEP = frozenset(
+    {
+        "p",
+        "div",
+        "span",
+        "br",
+        "table",
+        "thead",
+        "tbody",
+        "tfoot",
+        "tr",
+        "td",
+        "th",
+        "caption",
+        "colgroup",
+        "col",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "ul",
+        "ol",
+        "li",
+        "b",
+        "strong",
+        "i",
+        "u",
+        "em",
+        "font",
+        "center",
+        "sub",
+        "sup",
+        "small",
+        "pre",
+        "hr",
+        "style",
+    }
+)
+_DROP = frozenset(
+    {
+        "script",
+        "iframe",
+        "object",
+        "embed",
+        "frame",
+        "frameset",
+        "template",
+        "noscript",
+        "svg",
+        "math",
+        "textarea",
+        "select",
+        "title",
+        "head",
+        "meta",
+        "link",
+        "base",
+        "form",
+        "input",
+        "button",
+    }
+)
+_VOID = frozenset({"br", "hr", "col", "img"})
+_DROP_VOID = frozenset({"embed", "base", "meta", "link", "input", "frame"})
+_HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_ATTRS = frozenset(
+    {"colspan", "rowspan", "align", "valign", "width", "height", "style", "class", "id"}
+)
 
 
 class _Clean(HTMLParser):
@@ -14,6 +84,7 @@ class _Clean(HTMLParser):
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
         self._skip = 0
+        self._stack: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._start(tag, attrs, close=False)
@@ -23,13 +94,16 @@ class _Clean(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         name = tag.lower()
-        if name in _DROP:
-            if self._skip:
+        if self._skip:
+            if name in _DROP and name not in _DROP_VOID:
                 self._skip -= 1
             return
-        if self._skip:
+        if name in _DROP or (name not in _KEEP and name != "a"):
             return
-        self.parts.append(f"</{tag}>")
+        emit = "span" if name == "a" else name
+        if self._stack and self._stack[-1] == emit:
+            self._stack.pop()
+            self.parts.append(f"</{emit}>")
 
     def handle_data(self, data: str) -> None:
         if not self._skip:
@@ -43,41 +117,200 @@ class _Clean(HTMLParser):
         if not self._skip:
             self.parts.append(f"&#{name};")
 
+    def close(self) -> None:
+        super().close()
+        while self._stack:
+            name = self._stack.pop()
+            self.parts.append(f"</{name}>")
+
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, close: bool) -> None:
         name = tag.lower()
+        if name in _DROP_VOID:
+            return
+        if self._skip:
+            if name in _DROP and not close:
+                self._skip += 1
+            return
         if name in _DROP:
             if not close:
                 self._skip += 1
             return
-        if self._skip:
+        if name == "img":
+            src = _data_image_src(attrs)
+            if src is None:
+                return
+            self._emit("img", attrs, extra_src=src, void=True)
             return
+        if name not in _KEEP and name != "a":
+            return
+        emit = "span" if name == "a" else name
+        void = emit in _VOID or close
+        self._emit(emit, attrs, extra_src=None, void=void)
+        if not void:
+            self._stack.append(emit)
+
+    def _emit(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        *,
+        extra_src: str | None,
+        void: bool,
+    ) -> None:
         chunks = [f"<{tag}"]
         for key, value in attrs:
-            if not _keep_attr(key, value):
+            if not _keep_attr(key):
                 continue
             if value is None:
                 chunks.append(f" {key}")
             else:
                 chunks.append(f' {key}="{html.escape(value, quote=True)}"')
-        chunks.append(" />" if close else ">")
+        if extra_src is not None:
+            chunks.append(f' src="{html.escape(extra_src, quote=True)}"')
+        chunks.append(" />" if void else ">")
         self.parts.append("".join(chunks))
 
 
-def _keep_attr(key: str, value: str | None) -> bool:
+def _keep_attr(key: str) -> bool:
     name = key.lower()
-    if name.startswith("on"):
+    if name.startswith("on") or name.endswith(":href"):
         return False
-    script_url = name in _SCRIPT_URL_ATTRS or name.endswith(":href")
-    return not (script_url and value is not None and _javascript_url(value))
+    return name in _ATTRS
 
 
-def _javascript_url(value: str) -> bool:
-    text = "".join(ch for ch in html.unescape(value) if ch.isprintable())
-    return text.strip().casefold().startswith("javascript:")
+def _data_image_src(attrs: list[tuple[str, str | None]]) -> str | None:
+    for key, value in attrs:
+        if key.lower() != "src" or not value:
+            continue
+        if value.strip().lower().startswith("data:image/"):
+            return value.strip()
+    return None
 
 
 def prepare_disclosure_html(page: str) -> str:
+    """허용된 태그만 남긴 공시 HTML."""
     parser = _Clean()
     parser.feed(page)
     parser.close()
     return "".join(parser.parts)
+
+
+def heading_toc(page: str) -> tuple[str, list[tuple[str, str]]]:
+    """제목 태그에 없는 id를 붙이고 (id, 제목) 목록을 돌려준다."""
+    parser = _Headings()
+    parser.feed(page)
+    parser.close()
+    return "".join(parser.parts), parser.entries
+
+
+class _Headings(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.parts: list[str] = []
+        self.entries: list[tuple[str, str]] = []
+        self._capture: str | None = None
+        self._buf: list[str] = []
+        self._n = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, close=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._open(tag, attrs, close=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        name = tag.lower()
+        if self._capture is not None and name in _HEADINGS:
+            title = "".join(self._buf).strip() or self._capture
+            self.entries.append((self._capture, title))
+            self._capture = None
+            self._buf = []
+        self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._buf.append(data)
+        self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        token = f"&{name};"
+        if self._capture is not None:
+            self._buf.append(token)
+        self.parts.append(token)
+
+    def handle_charref(self, name: str) -> None:
+        token = f"&#{name};"
+        if self._capture is not None:
+            self._buf.append(token)
+        self.parts.append(token)
+
+    def _open(self, tag: str, attrs: list[tuple[str, str | None]], *, close: bool) -> None:
+        name = tag.lower()
+        rewritten = list(attrs)
+        if name in _HEADINGS and not close:
+            self._n += 1
+            ident = _attr(rewritten, "id") or f"toc-{self._n}"
+            if _attr(rewritten, "id") is None:
+                rewritten.append(("id", ident))
+            self._capture = ident
+            self._buf = []
+        self.parts.append(_start_html(tag, rewritten, close=close))
+
+
+def _attr(attrs: list[tuple[str, str | None]], key: str) -> str | None:
+    for name, value in attrs:
+        if name.lower() == key and value:
+            return value
+    return None
+
+
+def _start_html(tag: str, attrs: list[tuple[str, str | None]], *, close: bool) -> str:
+    chunks = [f"<{tag}"]
+    for key, value in attrs:
+        if value is None:
+            chunks.append(f" {key}")
+        else:
+            chunks.append(f' {key}="{html.escape(value, quote=True)}"')
+    chunks.append(" />" if close else ">")
+    return "".join(chunks)
+
+
+def toc_from_cache(path: Path) -> list[tuple[str, str]] | None:
+    """toc.json에 제목이 있으면 (id, 제목)을 돌려준다. 없으면 None."""
+    if not path.is_file():
+        return None
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    entries = _toc_entries(parsed)
+    if not entries:
+        return None
+    return entries
+
+
+def _toc_entries(parsed: object) -> list[tuple[str, str]]:
+    items: object = parsed
+    if isinstance(parsed, dict):
+        for key in ("sections", "items", "toc"):
+            if isinstance(parsed.get(key), list):
+                items = parsed[key]
+                break
+        else:
+            return []
+    if not isinstance(items, list):
+        return []
+    found: list[tuple[str, str]] = []
+    for index, item in enumerate(items, start=1):
+        if isinstance(item, str) and item.strip():
+            found.append((f"toc-{index}", item.strip()))
+            continue
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name") or item.get("section_name")
+        ident = item.get("id") or item.get("ele_id") or item.get("anchor")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        anchor = str(ident).strip() if isinstance(ident, str) and ident.strip() else f"toc-{index}"
+        found.append((anchor, title.strip()))
+    return found
