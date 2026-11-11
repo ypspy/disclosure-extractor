@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from dart_parser.gold.matching import matches
+from dart_parser.gold.capture_store import load_captures
+from dart_parser.gold.matching import matches, normalize_auditor
 from dart_parser.gold.periods import FLAGGED_SAMPLE_PERIODS
 from dart_parser.gold.sampler import is_claim
 from dart_parser.gold.snapshots import load_snapshot, versions
@@ -165,7 +166,7 @@ def score(conn: sqlite3.Connection, version: str, source: str = "labels") -> int
     conn.execute("DELETE FROM gold_scores WHERE extractor_version = ?", (version,))
     scored_at = datetime.now(UTC).isoformat()
     count = 0
-    labels = gold_final(conn) if source == "labels" else capture_labels(conn)
+    labels = gold_final(conn) if source == "labels" else final_capture_labels(conn)
     for label in labels:
         snapshot = load_snapshot(conn, version, label.rcept_no, label.dcm_no)
         if snapshot is None:
@@ -595,27 +596,162 @@ def rescore(conn: sqlite3.Connection, new_version: str) -> int:
 def capture_labels(conn: sqlite3.Connection, capture_pass: int = 1) -> Iterator[Label]:
     """입수가 끝난 문서의 칸을 채점 subject 단위 라벨로 바꾼다.
 
-    ``capture_pass``는 나중 재입수용이다. 1이 아니면 지금 테이블을 읽지 않는다.
+    1은 gold_samples가 done인 1차 입수다. 2는 재입수가 done인 2차 입수다.
     """
-    if capture_pass != 1:
+    if capture_pass == 1:
+        docs = conn.execute(
+            """
+            SELECT DISTINCT rcept_no, dcm_no
+            FROM gold_samples
+            WHERE status = 'done'
+            """
+        ).fetchall()
+    elif capture_pass == 2:
+        docs = conn.execute(
+            """
+            SELECT DISTINCT rcept_no, dcm_no
+            FROM gold_recapture_status
+            WHERE status = 'done'
+            """
+        ).fetchall()
+    else:
         return
-    docs = conn.execute(
-        """
-        SELECT DISTINCT rcept_no, dcm_no
-        FROM gold_samples
-        WHERE status = 'done'
-        """
-    ).fetchall()
-    grouped = _capture_groups()
     for doc in docs:
-        rows = _capture_rows_for(conn, str(doc["rcept_no"]), str(doc["dcm_no"]))
-        for bundle, subjects in grouped.items():
-            for subject in subjects:
-                label = _capture_label(
-                    str(doc["rcept_no"]), str(doc["dcm_no"]), bundle, subject, rows
-                )
-                if label is not None:
-                    yield label
+        rcept_no = str(doc["rcept_no"])
+        dcm_no = str(doc["dcm_no"])
+        rows = _capture_rows_for(conn, rcept_no, dcm_no, capture_pass)
+        yield from document_labels(rcept_no, dcm_no, rows)
+
+
+def document_labels(
+    rcept_no: str,
+    dcm_no: str,
+    rows: dict[tuple[str, str], dict[str, Any]],
+) -> list[Label]:
+    """행 dict를 채점 subject 라벨로 바꾼다. 기록 없음과 not_in_regime은 빠진다."""
+    labels: list[Label] = []
+    for bundle, subjects in _capture_groups().items():
+        for subject in subjects:
+            label = _capture_label(rcept_no, dcm_no, bundle, subject, rows)
+            if label is not None:
+                labels.append(label)
+    return labels
+
+
+def gold_values_agree(
+    bundle: str, subject: str, left: Label | None, right: Label | None
+) -> bool | None:
+    """1차·2차 라벨이 같은지. 둘 다 없으면 분모에서 빼려고 None을 돌려준다."""
+    if left is None and right is None:
+        return None
+    if left is None or right is None:
+        return False
+    if left.verdict != right.verdict:
+        return False
+    if left.verdict == "na":
+        return True
+    if left.verdict != "value":
+        return False
+    return _gold_value_equals(bundle, subject, left.gold_value, right.gold_value)
+
+
+def final_capture_labels(conn: sqlite3.Connection) -> Iterator[Label]:
+    """1차 라벨을 기본으로 하고, 판정이 2이면 2차로 바꾼다.
+
+    재입수가 끝났는데 불일치이고 판정이 없으면 그 키는 빠진다.
+    """
+    labels, _pending = _resolve_captures(conn)
+    yield from labels
+
+
+def pending_capture_adjudication(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str, str, str]]:
+    """재입수 불일치 가운데 판정이 없는 키."""
+    _labels, pending = _resolve_captures(conn)
+    return pending
+
+
+def _resolve_captures(
+    conn: sqlite3.Connection,
+) -> tuple[list[Label], list[tuple[str, str, str, str]]]:
+    first = {
+        (label.rcept_no, label.dcm_no, label.bundle, label.subject): label
+        for label in capture_labels(conn, capture_pass=1)
+    }
+    second = {
+        (label.rcept_no, label.dcm_no, label.bundle, label.subject): label
+        for label in capture_labels(conn, capture_pass=2)
+    }
+    done = {
+        (str(row["rcept_no"]), str(row["dcm_no"]))
+        for row in conn.execute(
+            """
+            SELECT rcept_no, dcm_no FROM gold_recapture_status
+            WHERE status = 'done'
+            """
+        )
+    }
+    chosen = {
+        (str(row["rcept_no"]), str(row["dcm_no"]), str(row["bundle"]), str(row["subject"])): int(
+            row["chosen_pass"]
+        )
+        for row in conn.execute(
+            "SELECT rcept_no, dcm_no, bundle, subject, chosen_pass FROM gold_adjudications"
+        )
+    }
+    keys = set(first)
+    for key in second:
+        if key[:2] in done:
+            keys.add(key)
+    labels: list[Label] = []
+    pending: list[tuple[str, str, str, str]] = []
+    for key in sorted(keys):
+        rcept_no, dcm_no, bundle, subject = key
+        left = first.get(key)
+        if (rcept_no, dcm_no) not in done:
+            if left is not None:
+                labels.append(left)
+            continue
+        right = second.get(key)
+        agreed = gold_values_agree(bundle, subject, left, right)
+        if agreed is None:
+            continue
+        if agreed:
+            picked = left if left is not None else right
+            if picked is not None:
+                labels.append(picked)
+            continue
+        pick = chosen.get(key)
+        if pick is None:
+            pending.append(key)
+            continue
+        picked = right if pick == 2 else left
+        if picked is not None:
+            labels.append(picked)
+    return labels, pending
+
+
+def _gold_value_equals(bundle: str, subject: str, left: Any, right: Any) -> bool:
+    if bundle == "accounts":
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return False
+        return left.get("value") == right.get("value") and left.get("unit_scale") == right.get(
+            "unit_scale"
+        )
+    if bundle == "notes_toc":
+        return _notes_agree(left, right)
+    if bundle == "auditor":
+        if left is None or right is None:
+            return False
+        return normalize_auditor(str(left)) == normalize_auditor(str(right))
+    if bundle == "audit_report_date":
+        if not left or not right:
+            return False
+        return str(left)[:10] == str(right)[:10]
+    if bundle in {"activities", "communications"} and subject == "table":
+        return True
+    return left == right
 
 
 def _capture_groups() -> dict[str, list[str]]:
@@ -625,17 +761,13 @@ def _capture_groups() -> dict[str, list[str]]:
 
 
 def _capture_rows_for(
-    conn: sqlite3.Connection, rcept_no: str, dcm_no: str
-) -> dict[tuple[str, str], sqlite3.Row]:
-    found = conn.execute(
-        """
-        SELECT bundle, subject, status, value
-        FROM gold_captures
-        WHERE rcept_no = ? AND dcm_no = ?
-        """,
-        (rcept_no, dcm_no),
-    ).fetchall()
-    return {(str(row["bundle"]), str(row["subject"])): row for row in found}
+    conn: sqlite3.Connection, rcept_no: str, dcm_no: str, capture_pass: int = 1
+) -> dict[tuple[str, str], dict[str, Any]]:
+    loaded = load_captures(conn, rcept_no, dcm_no, capture_pass=capture_pass)
+    return {
+        key: {"status": row["status"], "value": row["value"]}
+        for key, row in loaded.items()
+    }
 
 
 def _capture_label(
@@ -643,7 +775,7 @@ def _capture_label(
     dcm_no: str,
     bundle: str,
     subject: str,
-    rows: dict[tuple[str, str], sqlite3.Row],
+    rows: dict[tuple[str, str], dict[str, Any]],
 ) -> Label | None:
     if bundle in TABLE_BUNDLES and subject == "table":
         return _table_label(rcept_no, dcm_no, bundle, rows)
@@ -664,7 +796,7 @@ def _table_label(
     rcept_no: str,
     dcm_no: str,
     bundle: str,
-    rows: dict[tuple[str, str], sqlite3.Row],
+    rows: dict[tuple[str, str], dict[str, Any]],
 ) -> Label | None:
     if bundle == "hours":
         return _hours_label(rcept_no, dcm_no, rows)
@@ -683,7 +815,7 @@ def _table_label(
 def _hours_label(
     rcept_no: str,
     dcm_no: str,
-    rows: dict[tuple[str, str], sqlite3.Row],
+    rows: dict[tuple[str, str], dict[str, Any]],
 ) -> Label | None:
     audit = _hours_slot(rows, ("total|audit|current", "total|audit_hours|current"))
     headcount = _hours_slot(rows, ("total|headcount|current",))
@@ -707,8 +839,8 @@ def _hours_label(
 
 
 def _hours_slot(
-    rows: dict[tuple[str, str], sqlite3.Row], subjects: tuple[str, ...]
-) -> sqlite3.Row | None:
+    rows: dict[tuple[str, str], dict[str, Any]], subjects: tuple[str, ...]
+) -> dict[str, Any] | None:
     for subject in subjects:
         row = rows.get(("hours", subject))
         if row is not None:
@@ -716,7 +848,7 @@ def _hours_slot(
     return None
 
 
-def _slot_number(row: sqlite3.Row | None) -> Any:
+def _slot_number(row: dict[str, Any] | None) -> Any:
     if row is None or row["status"] != "found" or not row["value"]:
         return None
     return _loads(row["value"])
