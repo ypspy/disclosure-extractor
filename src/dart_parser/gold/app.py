@@ -24,7 +24,12 @@ from wsgiref.simple_server import make_server
 
 from dart_parser.gold.cache import CACHE_ROOT, cache_dir, load_section_html
 from dart_parser.gold.capture import capture_rows, known_subject
-from dart_parser.gold.capture_html import heading_toc, prepare_disclosure_html, toc_from_cache
+from dart_parser.gold.capture_html import (
+    heading_toc,
+    prepare_disclosure_html,
+    toc_from_cache,
+    toc_ids_present,
+)
 from dart_parser.gold.capture_page import render_capture_page
 from dart_parser.gold.capture_store import (
     clear_capture,
@@ -173,11 +178,11 @@ class ReviewStore:
         cleaned = prepare_disclosure_html(loaded.text)
         folder = _document_folder(self.cache_root, rcept_no, dcm_no)
         listed = toc_from_cache(folder / "toc.json")
-        if listed is None:
+        if listed is not None and toc_ids_present(cleaned, listed):
+            toc = tuple(listed)
+        else:
             cleaned, headings = heading_toc(cleaned)
             toc = tuple(headings)
-        else:
-            toc = tuple(listed)
         return SourceDocument(cleaned, loaded.encoding_uncertain, ambiguous, toc)
 
     def _dcm_ambiguous(self, rcept_no: str, dcm_no: str) -> bool:
@@ -594,7 +599,7 @@ def _post_unit(
 
 
 def _index(raw: str) -> int | None:
-    if not raw.isdigit():
+    if not raw.isdecimal():
         return None
     return int(raw)
 
@@ -605,7 +610,7 @@ def _ambiguous(
     dcm_no: str,
     start_response: Any,
 ) -> list[bytes] | None:
-    if not app.store.load_disclosure(rcept_no, dcm_no).dcm_ambiguous:
+    if not app.store._dcm_ambiguous(rcept_no, dcm_no):
         return None
     return _html(start_response, "409 Conflict", "문서번호를 구분할 수 없습니다.")
 

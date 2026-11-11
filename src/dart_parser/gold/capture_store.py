@@ -82,7 +82,7 @@ def set_capture_status(
         if previous is not None:
             _history(conn, previous, "update")
         _upsert(conn, rcept_no, dcm_no, bundle, subject, status, None, "")
-        _mark_started(conn, rcept_no, dcm_no)
+        _mark_started(conn, rcept_no, dcm_no, reopen_done=True)
         return True
 
     return bool(_finish(conn, work))
@@ -101,7 +101,7 @@ def clear_capture(
             return
         _history(conn, previous, "clear")
         _delete(conn, rcept_no, dcm_no, bundle, subject)
-        _mark_started(conn, rcept_no, dcm_no)
+        _mark_started(conn, rcept_no, dcm_no, reopen_done=True)
 
     _finish(conn, work)
 
@@ -357,7 +357,9 @@ def _delete(
     )
 
 
-def _mark_started(conn: sqlite3.Connection, rcept_no: str, dcm_no: str) -> None:
+def _mark_started(
+    conn: sqlite3.Connection, rcept_no: str, dcm_no: str, *, reopen_done: bool = False
+) -> None:
     conn.execute(
         """
         UPDATE gold_samples
@@ -365,6 +367,19 @@ def _mark_started(conn: sqlite3.Connection, rcept_no: str, dcm_no: str) -> None:
             started_at = COALESCE(started_at, ?)
         WHERE rcept_no = ? AND dcm_no = ?
           AND status NOT IN ('done', 'excluded', 'skipped')
+        """,
+        (_now(), rcept_no, dcm_no),
+    )
+    if not reopen_done:
+        return
+    conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'in_progress',
+            finished_at = NULL,
+            started_at = COALESCE(started_at, ?)
+        WHERE rcept_no = ? AND dcm_no = ?
+          AND status = 'done'
         """,
         (_now(), rcept_no, dcm_no),
     )

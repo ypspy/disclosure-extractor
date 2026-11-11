@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from dart_parser.fallback.schemas import HoursCell
 from dart_parser.gold.db import migrate, open_gold
 from dart_parser.gold.scoring import capture_labels, metrics, score
 
@@ -249,3 +250,55 @@ def test_label_scores_stay_the_same(tmp_path) -> None:
     assert score(conn, _VERSION, source="labels") == 2
     assert _outcomes(conn)[("L1", "opinion", "value")] == "tp"
     assert _outcomes(conn)[("L1", "company_name", "value")] == "fp"
+
+
+def _hours_cell(
+    role: str,
+    role_key: str,
+    metric: str,
+    metric_key: str,
+    value: float,
+    *,
+    period: str = "current",
+) -> dict:
+    return HoursCell(
+        role=role,
+        role_key=role_key,
+        metric=metric,
+        metric_key=metric_key,
+        period=period,  # type: ignore[arg-type]
+        value=value,
+    ).model_dump()
+
+
+def test_capture_hours_reads_hours_cell_snapshots(tmp_path) -> None:
+    conn = _db(tmp_path)
+    shared = [
+        _hours_cell("합계", "total", "투입인원", "headcount", 6.0),
+        _hours_cell("업무수행이사", "engagement_partner", "감사시간", "audit_hours", 9.0),
+        _hours_cell("합계", "total", "감사시간", "audit_hours", 1.0, period="prior"),
+    ]
+    for rcept, audit in (("HOK", 120.0), ("HBAD", 99.0)):
+        _sample(conn, rcept)
+        _snapshot(
+            conn,
+            rcept,
+            {
+                "hours": {
+                    "status": "found",
+                    "value": {
+                        "cells": [
+                            _hours_cell("합계", "total", "감사시간", "audit_hours", audit),
+                            *shared,
+                        ]
+                    },
+                }
+            },
+        )
+        _capture(conn, rcept, "hours", "total|audit_hours|current", "found", 120.0)
+        _capture(conn, rcept, "hours", "total|headcount|current", "found", 6.0)
+    conn.commit()
+    score(conn, _VERSION, source="captures")
+    outcomes = _outcomes(conn)
+    assert outcomes[("HOK", "hours", "table")] == "tp"
+    assert outcomes[("HBAD", "hours", "table")] == "fp"

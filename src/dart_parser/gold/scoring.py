@@ -434,6 +434,32 @@ def _canon(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _intake_hours_keys(table: Any) -> tuple[Any, Any]:
+    """입수 채점의 당기 합계. role_key·metric_key가 없으면 role·metric을 쓴다."""
+    audit = None
+    headcount = None
+    if not isinstance(table, list):
+        return (audit, headcount)
+    for cell in table:
+        if not isinstance(cell, dict):
+            continue
+        role = _cell_key(cell, "role_key", "role")
+        metric = _cell_key(cell, "metric_key", "metric")
+        if role != "total" or cell.get("period") != "current":
+            continue
+        if metric in {"audit_hours", "audit"}:
+            audit = cell.get("value")
+        if metric == "headcount":
+            headcount = cell.get("value")
+    return (audit, headcount)
+
+
+def _cell_key(cell: dict[str, Any], key: str, old: str) -> Any:
+    if key not in cell:
+        return cell.get(old)
+    return cell.get(key)
+
+
 def _hours_keys(table: Any) -> tuple[Any, Any]:
     """총 감사시간·투입 인원(당기, 합계)."""
     audit = None
@@ -716,7 +742,7 @@ def _capture_agreed(label: Label, predicted: Any) -> bool:
         wanted = label.gold_value
         if not isinstance(wanted, list) or len(wanted) != 2:
             return False
-        return _hours_keys(predicted) == (wanted[0], wanted[1])
+        return _intake_hours_keys(predicted) == (wanted[0], wanted[1])
     if label.bundle in {"activities", "communications"} and label.subject == "table":
         return predicted is not None
     if label.bundle == "notes_toc":

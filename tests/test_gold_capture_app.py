@@ -474,6 +474,270 @@ def test_first_capture_marks_the_sample_in_progress(tmp_path: Path) -> None:
     app.close()
 
 
+def _submit(
+    app: ReviewApplication,
+    path: str,
+    fields: dict[str, str],
+    host: str = "localhost:80",
+) -> tuple[str, dict[str, str], bytes]:
+    payload = dict(fields)
+    payload["token"] = app.token
+    raw = urlencode(payload).encode("utf-8")
+    environ = {
+        "PATH_INFO": path,
+        "QUERY_STRING": "",
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        "CONTENT_LENGTH": str(len(raw)),
+        "HTTP_HOST": host,
+        "SERVER_PORT": "80",
+    }
+    setup_testing_defaults(environ)
+    environ["REQUEST_METHOD"] = "POST"
+    environ["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    environ["CONTENT_LENGTH"] = str(len(raw))
+    environ["HTTP_HOST"] = host
+    environ["SERVER_PORT"] = "80"
+    environ["wsgi.input"] = io.BytesIO(raw)
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]], exc_info=None) -> None:
+        del exc_info
+        captured["status"] = status
+        captured["headers"] = {key: value for key, value in headers}
+
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), dict(captured["headers"]), body
+
+
+def _sample_status(tmp_path: Path) -> tuple[str, str | None]:
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    row = conn.execute(
+        "SELECT status, finished_at FROM gold_samples WHERE dcm_no = 'D100'"
+    ).fetchone()
+    conn.close()
+    return str(row[0]), row[1]
+
+
+def test_each_saved_line_has_a_remove_button(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "notes_toc", "subject": "value", "text": "일반사항"},
+    )
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "notes_toc", "subject": "value", "text": "재고자산"},
+    )
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "communications", "subject": "items", "text": "2017년 3월 2일 회의"},
+    )
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "communications", "subject": "items", "text": "둘째 회의"},
+    )
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert page.count('name="status" value="remove_title"') == 2
+    assert page.count('name="status" value="remove_item"') == 2
+    assert page.count(f'name="token" value="{app.token}"') >= 2
+    assert set(re.findall(r'name="token" value="([^"]*)"', page)) == {app.token}
+    assert 'name="index" value="0"' in page
+    assert 'name="index" value="1"' in page
+    removed, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "notes_toc",
+            "subject": "value",
+            "status": "remove_title",
+            "index": "0",
+        },
+    )
+    assert removed.startswith("303")
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    notes = json.loads(
+        conn.execute(
+            "SELECT value FROM gold_captures WHERE bundle = 'notes_toc'"
+        ).fetchone()[0]
+    )
+    assert notes["titles"] == ["재고자산"]
+    history = conn.execute(
+        """
+        SELECT value, action FROM gold_capture_history
+        WHERE bundle = 'notes_toc'
+        ORDER BY rowid
+        """
+    ).fetchall()
+    assert json.loads(history[-1][0])["titles"] == ["일반사항", "재고자산"]
+    assert history[-1][1] == "update"
+    dropped, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "communications",
+            "subject": "items",
+            "status": "remove_item",
+            "index": "0",
+        },
+    )
+    assert dropped.startswith("303")
+    items = json.loads(
+        conn.execute(
+            "SELECT value FROM gold_captures WHERE bundle = 'communications'"
+        ).fetchone()[0]
+    )
+    assert [item["raw"] for item in items] == ["둘째 회의"]
+    rounds = conn.execute(
+        """
+        SELECT value, action FROM gold_capture_history
+        WHERE bundle = 'communications' AND subject = 'items'
+        ORDER BY rowid
+        """
+    ).fetchall()
+    assert json.loads(rounds[-1][0])[0]["raw"] == "2017년 3월 2일 회의"
+    assert rounds[-1][1] == "update"
+    conn.close()
+    _status, _headers, again = _request(app, "GET", "/doc/R100/D100")
+    shown = again.decode()
+    assert "일반사항" not in shown
+    assert "재고자산" in shown
+    assert "2017년 3월 2일 회의" not in shown
+    assert "둘째 회의" in shown
+    assert shown.count('name="status" value="remove_title"') == 1
+    assert shown.count('name="status" value="remove_item"') == 1
+    app.close()
+
+
+def test_non_decimal_remove_index_is_a_bad_request(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "notes_toc",
+            "subject": "value",
+            "status": "remove_title",
+            "index": "²",
+        },
+    )
+    assert status.startswith("400")
+    app.close()
+
+
+def test_done_document_reopens_when_a_cell_is_cleared_or_its_status_changes(
+    tmp_path: Path,
+) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    for row in capture_rows():
+        conn.execute(
+            """
+            INSERT INTO gold_captures (
+                rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+            ) VALUES ('R100', 'D100', ?, ?, 'not_applicable', NULL, '', 't')
+            """,
+            (row.bundle, row.subject),
+        )
+    conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'done', finished_at = '2026-11-11T00:00:00+00:00'
+        WHERE dcm_no = 'D100'
+        """
+    )
+    conn.commit()
+    conn.close()
+    cleared, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "status": "clear"},
+    )
+    assert cleared.startswith("303")
+    assert _sample_status(tmp_path) == ("in_progress", None)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'done', finished_at = '2026-11-11T00:00:00+00:00'
+        WHERE dcm_no = 'D100'
+        """
+    )
+    conn.commit()
+    conn.close()
+    changed, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "opinion", "subject": "value", "status": "not_in_regime"},
+    )
+    assert changed.startswith("303")
+    assert _sample_status(tmp_path) == ("in_progress", None)
+    app.close()
+
+
+def test_post_checks_ambiguity_without_loading_the_filing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _build(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("load_disclosure")
+
+    monkeypatch.setattr(app.store, "load_disclosure", boom)
+    saved, _headers, _body = _submit(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "가나"},
+    )
+    assert saved.startswith("303")
+    unit, _headers, _body = _submit(
+        app, "/doc/R100/D100/unit", {"unit_group": "bs", "unit_scale": "1"}
+    )
+    assert unit.startswith("303")
+    done, _headers, _body = _submit(app, "/doc/R100/D100/complete", {})
+    assert done.startswith("400")
+    app.close()
+
+
+def test_toc_ids_missing_from_html_use_heading_titles(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    folder = tmp_path / "cache" / "R100"
+    folder.mkdir(parents=True)
+    (folder / "main.html").write_text(
+        '<h2 id="keep-me">고유헤더</h2><p>본문</p>', encoding="utf-8"
+    )
+    (folder / "toc.json").write_text(
+        json.dumps(
+            [
+                {"id": "keep-me", "title": "있는제목"},
+                {"id": "missing-id", "title": "없는목차"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    assert "없는목차" not in page
+    assert "있는제목" not in page
+    assert "고유헤더" in page
+    assert 'data-scroll="keep-me"' in page
+    (folder / "toc.json").write_text(
+        json.dumps([{"id": "keep-me", "title": "캐시목차"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _status, _headers, kept = _request(app, "GET", "/doc/R100/D100")
+    shown = kept.decode()
+    assert 'data-scroll="keep-me"' in shown
+    assert "캐시목차" in shown
+    app.close()
+
+
 def test_going_concern_rule_is_on_the_row(tmp_path: Path) -> None:
     app = _build(tmp_path)
     _status, _headers, body = _request(app, "GET", "/doc/R100/D100")

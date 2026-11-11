@@ -177,9 +177,10 @@ def _row_form(
     missed: bool,
 ) -> str:
     action = html.escape(capture_url, quote=True)
-    shown = _block(_saved_text(row, record))
+    lines = _list_lines(row, record)
+    shown = "" if lines is not None else _block(_saved_text(row, record))
     miss = "<p>읽을 수 없습니다</p>" if missed else ""
-    return (
+    form = (
         f'<form class="capture-row" method="post" action="{action}">'
         f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
         f'<input type="hidden" name="bundle" value="{html.escape(row.bundle, quote=True)}">'
@@ -193,6 +194,62 @@ def _row_form(
         '<p class="row-error"></p>'
         "</form>"
     )
+    if not lines:
+        return form
+    return form + _remove_forms(row, lines, token, capture_url)
+
+
+def _list_lines(row: CaptureRow, record: Any) -> list[str] | None:
+    parsed = _found_json(record)
+    if row.bundle == "notes_toc" and row.subject == "value":
+        if not isinstance(parsed, dict):
+            return None
+        titles = parsed.get("titles") or []
+        return [str(title) for title in titles]
+    if row.bundle == "communications" and row.subject == "items":
+        if not isinstance(parsed, list):
+            return None
+        return [
+            f"{item.get('round')} {item.get('raw')}"
+            for item in parsed
+            if isinstance(item, dict)
+        ]
+    return None
+
+
+def _found_json(record: Any) -> Any:
+    if record is None or str(record["status"]) != "found" or not record["value"]:
+        return None
+    try:
+        return json.loads(record["value"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _remove_forms(
+    row: CaptureRow,
+    lines: list[str],
+    token: str,
+    capture_url: str,
+) -> str:
+    status = "remove_title" if row.bundle == "notes_toc" else "remove_item"
+    action = html.escape(capture_url, quote=True)
+    hidden_token = html.escape(token, quote=True)
+    bundle = html.escape(row.bundle, quote=True)
+    subject = html.escape(row.subject, quote=True)
+    parts: list[str] = []
+    for index, line in enumerate(lines):
+        parts.append(
+            f'<form method="post" action="{action}">'
+            f'<input type="hidden" name="token" value="{hidden_token}">'
+            f'<input type="hidden" name="bundle" value="{bundle}">'
+            f'<input type="hidden" name="subject" value="{subject}">'
+            f'<input type="hidden" name="index" value="{index}">'
+            f"<span>{html.escape(line)}</span>"
+            f'<button type="submit" name="status" value="{status}">지우기</button>'
+            "</form>"
+        )
+    return "".join(parts)
 
 
 def _saved_text(row: CaptureRow, record: Any) -> str:

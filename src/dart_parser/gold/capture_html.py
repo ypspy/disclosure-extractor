@@ -275,6 +275,16 @@ def _start_html(tag: str, attrs: list[tuple[str, str | None]], *, close: bool) -
     return "".join(chunks)
 
 
+def toc_ids_present(page: str, entries: list[tuple[str, str]]) -> bool:
+    """목차 id가 HTML의 id 속성에 모두 있는지."""
+    if not entries:
+        return False
+    for ident, _title in entries:
+        if f'id="{html.escape(ident, quote=True)}"' not in page:
+            return False
+    return True
+
+
 def toc_from_cache(path: Path) -> list[tuple[str, str]] | None:
     """toc.json에 제목이 있으면 (id, 제목)을 돌려준다. 없으면 None."""
     if not path.is_file():
