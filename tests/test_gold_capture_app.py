@@ -160,6 +160,8 @@ def test_document_page_is_capture_without_an_iframe(tmp_path: Path) -> None:
     assert "자산총계 · 당기" in page
     assert "R100" in page and "D100" in page
     assert 'name="verdict"' not in page
+    assert "event.preventDefault()" in page
+    assert page.count('<select name="unit_scale"><option value="" selected></option>') == 2
     app.close()
 
 
@@ -190,6 +192,27 @@ def test_click_saves_when_a_row_and_unit_are_chosen(tmp_path: Path) -> None:
     path, _, query = location.partition("?")
     _status, _headers, again = _request(app, "GET", path, query)
     assert "읽을 수 없습니다" in again.decode()
+    app.close()
+
+
+def test_unusable_unit_scale_is_a_bad_request(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    blank, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/unit",
+        {"unit_group": "bs", "unit_scale": ""},
+    )
+    assert blank.startswith("400")
+    bad, _headers, _body = _post(
+        app,
+        "/doc/R100/D100/unit",
+        {"unit_group": "bs", "unit_scale": "²"},
+    )
+    assert bad.startswith("400")
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    count = conn.execute("SELECT count(*) FROM gold_capture_units").fetchone()[0]
+    conn.close()
+    assert count == 0
     app.close()
 
 

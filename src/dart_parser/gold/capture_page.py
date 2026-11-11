@@ -136,7 +136,8 @@ def _unit_form(
     unit_group: str,
     chosen: int | None,
 ) -> str:
-    options: list[str] = []
+    blank = " selected" if chosen is None else ""
+    options: list[str] = [f'<option value=""{blank}></option>']
     for scale, name in _SCALES:
         selected = " selected" if chosen == scale else ""
         options.append(f'<option value="{scale}"{selected}>{html.escape(name)}</option>')
@@ -244,6 +245,7 @@ def _script(capture_url: str, filing_html: str) -> str:
         "root.addEventListener('click', function (event) {\n"
         "  const chosen = selectedRow();\n"
         "  if (!chosen) return;\n"
+        "  event.preventDefault();\n"
         "  const body = new URLSearchParams();\n"
         "  body.set('token', chosen.token.value);\n"
         "  body.set('bundle', chosen.bundle.value);\n"

@@ -547,7 +547,10 @@ def _post_unit(
 def _unit_scale(raw: str) -> int | None:
     if not raw.isdigit():
         return None
-    return int(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 def _see_other(start_response: Any, rcept_no: str, dcm_no: str) -> list[bytes]:

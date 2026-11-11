@@ -56,6 +56,20 @@ def test_changing_the_unit_recomputes_only_scale_and_won(tmp_path) -> None:
     assert load_units(conn, "R", "D") == {"is": 1_000_000, "bs": 1}
 
 
+def test_changed_icfr_engagement_drops_the_opinion(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토")
+    assert save_capture(conn, "R", "D", "icfr", "opinion", "한정")
+    assert not save_capture(conn, "R", "D", "icfr", "engagement", "감사 및 검토")
+    assert ("icfr", "opinion") in load_captures(conn, "R", "D")
+    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토")
+    assert ("icfr", "opinion") in load_captures(conn, "R", "D")
+    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 감사")
+    saved = load_captures(conn, "R", "D")
+    assert json.loads(saved[("icfr", "engagement")]["value"]) == "audit"
+    assert ("icfr", "opinion") not in saved
+
+
 def test_absent_status_and_clear(tmp_path) -> None:
     conn = _conn(tmp_path)
     assert set_capture_status(conn, "R", "D", "subsidiary", "value", "not_applicable")

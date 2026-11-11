@@ -6,6 +6,7 @@ import html
 from html.parser import HTMLParser
 
 _DROP = frozenset({"script", "iframe"})
+_SCRIPT_URL_ATTRS = frozenset({"action", "formaction", "href", "src"})
 
 
 class _Clean(HTMLParser):
@@ -52,7 +53,7 @@ class _Clean(HTMLParser):
             return
         chunks = [f"<{tag}"]
         for key, value in attrs:
-            if key.lower().startswith("on"):
+            if not _keep_attr(key, value):
                 continue
             if value is None:
                 chunks.append(f" {key}")
@@ -60,6 +61,19 @@ class _Clean(HTMLParser):
                 chunks.append(f' {key}="{html.escape(value, quote=True)}"')
         chunks.append(" />" if close else ">")
         self.parts.append("".join(chunks))
+
+
+def _keep_attr(key: str, value: str | None) -> bool:
+    name = key.lower()
+    if name.startswith("on"):
+        return False
+    script_url = name in _SCRIPT_URL_ATTRS or name.endswith(":href")
+    return not (script_url and value is not None and _javascript_url(value))
+
+
+def _javascript_url(value: str) -> bool:
+    text = "".join(ch for ch in html.unescape(value) if ch.isprintable())
+    return text.strip().casefold().startswith("javascript:")
 
 
 def prepare_disclosure_html(page: str) -> str:

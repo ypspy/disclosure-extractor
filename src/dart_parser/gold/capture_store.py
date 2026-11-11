@@ -37,6 +37,8 @@ def save_capture(
     if (bundle, subject) in {("notes_toc", "value"), ("communications", "items")}:
         parsed = _append(conn, rcept_no, dcm_no, bundle, subject, parsed)
     _upsert(conn, rcept_no, dcm_no, bundle, subject, "found", parsed, text)
+    if bundle == "icfr" and subject == "engagement" and parsed != engagement:
+        clear_capture(conn, rcept_no, dcm_no, "icfr", "opinion")
     return True
 
 

@@ -19,22 +19,6 @@ SCALES = frozenset({1, 1000, 1_000_000, 100_000_000})
 _OPINIONS = ("부적정", "한정", "거절", "적정")
 _GAAP = ("K-IFRS", "K-GAAP")
 _DATE_RE = re.compile(r"(\d{4})\s*(?:년|[.\-])\s*(\d{1,2})\s*(?:월|[.\-])\s*(\d{1,2})\s*일?")
-_ACTIVITY_SUBJECTS = (
-    "planning",
-    "fieldwork",
-    "tcwg_communication",
-    "expert",
-    "inventory_observation.date",
-    "inventory_observation.place",
-    "inventory_observation.target",
-    "financial_asset_observation.date",
-    "financial_asset_observation.place",
-    "financial_asset_observation.target",
-    "external_confirmations.financial",
-    "external_confirmations.receivables_payables",
-    "external_confirmations.legal",
-    "external_confirmations.other",
-)
 _ACTIVITY_LABELS = {
     "planning": "전반감사계획",
     "fieldwork": "현장감사",
