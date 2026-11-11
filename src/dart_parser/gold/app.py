@@ -33,6 +33,7 @@ from dart_parser.gold.capture_html import (
 from dart_parser.gold.capture_page import render_capture_page
 from dart_parser.gold.capture_store import (
     clear_capture,
+    finish_recapture,
     load_captures,
     load_units,
     remove_list_item,
@@ -41,6 +42,16 @@ from dart_parser.gold.capture_store import (
     set_unit,
 )
 from dart_parser.gold.db import migrate, open_gold
+from dart_parser.gold.recapture import (
+    can_open_recapture,
+    consistency_report,
+    disagreements,
+    next_recapture,
+    recapture_in_progress,
+    recapture_progress,
+    save_adjudication,
+)
+from dart_parser.gold.scoring import Label
 
 LOOPBACK = "127.0.0.1"
 _ID = re.compile(r"^[A-Za-z0-9]+$")
@@ -251,6 +262,8 @@ class ReviewApplication:
             if method == "GET" and parts == ["static", "capture.js"]:
                 return _javascript(start_response)
             return _html(start_response, "404 Not Found", "페이지가 없습니다.")
+        if parts[:1] == ["recapture"]:
+            return _recapture(self, environ, start_response, method, parts[1:], query)
         if parts == ["next"] and method == "GET":
             return _next_document(self, start_response, query)
         if (
@@ -282,6 +295,8 @@ class ReviewApplication:
         if not parts:
             return _html(start_response, "200 OK", _list_page(self.store, query))
         if len(parts) == 3 and parts[0] == "doc" and _safe_id(parts[1]) and _safe_id(parts[2]):
+            if recapture_in_progress(self.store.conn, parts[1], parts[2]):
+                return _html(start_response, "409 Conflict", "재입수 중")
             page = _capture_document(self, parts[1], parts[2], query)
             if page is None:
                 return _html(start_response, "404 Not Found", "문서가 없습니다.")
@@ -463,6 +478,9 @@ def _capture_document(
     rcept_no: str,
     dcm_no: str,
     query: dict[str, list[str]],
+    *,
+    capture_pass: int = 1,
+    base: str = "doc",
 ) -> str | None:
     if app.store.sample(rcept_no, dcm_no) is None:
         return None
@@ -470,9 +488,12 @@ def _capture_document(
     company, report, filed = _filing_meta(app.store, rcept_no)
     sample = app.store.sample(rcept_no, dcm_no)
     assert sample is not None
-    saved = load_captures(app.store.conn, rcept_no, dcm_no)
+    saved = load_captures(app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass)
     rows = capture_rows()
-    period_done, period_total = app.store.period_progress(str(sample["period"]))
+    if capture_pass == 2:
+        period_done, period_total = recapture_progress(app.store.conn, str(sample["period"]))
+    else:
+        period_done, period_total = app.store.period_progress(str(sample["period"]))
     return render_capture_page(
         rcept_no,
         dcm_no,
@@ -480,7 +501,7 @@ def _capture_document(
         source.html or "",
         rows,
         saved,
-        load_units(app.store.conn, rcept_no, dcm_no),
+        load_units(app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass),
         company,
         report,
         filed,
@@ -495,6 +516,7 @@ def _capture_document(
         period_total=period_total,
         period=str(sample["period"]),
         toc=source.toc,
+        base=base,
     )
 
 
@@ -526,6 +548,9 @@ def _post_capture(
     start_response: Any,
     rcept_no: str,
     dcm_no: str,
+    *,
+    capture_pass: int = 1,
+    base: str = "doc",
 ) -> list[bytes]:
     if not _host_allowed(environ) or not _origin_allowed(environ):
         return _reject(start_response)
@@ -534,6 +559,10 @@ def _post_capture(
         return _reject(start_response)
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    if capture_pass == 2:
+        closed = _recapture_closed(app, rcept_no, dcm_no, start_response)
+        if closed is not None:
+            return closed
     blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
     if blocked is not None:
         return blocked
@@ -550,19 +579,25 @@ def _post_capture(
         if (bundle, subject) != target:
             return _html(start_response, "400 Bad Request", "항목이 아닙니다.")
         index = _index(_one(form, "index"))
-        if index is None or not remove_list_item(conn, rcept_no, dcm_no, bundle, subject, index):
+        if index is None or not remove_list_item(
+            conn, rcept_no, dcm_no, bundle, subject, index, capture_pass=capture_pass
+        ):
             return _html(start_response, "400 Bad Request", "지우지 못했습니다.")
-        return _see_other(start_response, rcept_no, dcm_no)
+        return _see_other(start_response, rcept_no, dcm_no, base)
     if status in _ABSENT:
-        if not set_capture_status(conn, rcept_no, dcm_no, bundle, subject, status):
+        if not set_capture_status(
+            conn, rcept_no, dcm_no, bundle, subject, status, capture_pass=capture_pass
+        ):
             return _html(start_response, "400 Bad Request", "저장하지 못했습니다.")
-        return _see_other(start_response, rcept_no, dcm_no)
+        return _see_other(start_response, rcept_no, dcm_no, base)
     if status == "clear":
-        clear_capture(conn, rcept_no, dcm_no, bundle, subject)
-        return _see_other(start_response, rcept_no, dcm_no)
-    if not save_capture(conn, rcept_no, dcm_no, bundle, subject, _one(form, "text")):
+        clear_capture(conn, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass)
+        return _see_other(start_response, rcept_no, dcm_no, base)
+    if not save_capture(
+        conn, rcept_no, dcm_no, bundle, subject, _one(form, "text"), capture_pass=capture_pass
+    ):
         location = (
-            f"/doc/{quote(rcept_no)}/{quote(dcm_no)}"
+            f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}"
             f"?miss_bundle={quote(bundle)}&miss_subject={quote(subject)}"
         )
         return _html(
@@ -571,7 +606,7 @@ def _post_capture(
             "읽을 수 없습니다.",
             [("Location", location)],
         )
-    return _see_other(start_response, rcept_no, dcm_no)
+    return _see_other(start_response, rcept_no, dcm_no, base)
 
 
 def _post_unit(
@@ -580,6 +615,9 @@ def _post_unit(
     start_response: Any,
     rcept_no: str,
     dcm_no: str,
+    *,
+    capture_pass: int = 1,
+    base: str = "doc",
 ) -> list[bytes]:
     if not _host_allowed(environ) or not _origin_allowed(environ):
         return _reject(start_response)
@@ -588,14 +626,20 @@ def _post_unit(
         return _reject(start_response)
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    if capture_pass == 2:
+        closed = _recapture_closed(app, rcept_no, dcm_no, start_response)
+        if closed is not None:
+            return closed
     blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
     if blocked is not None:
         return blocked
     scale = _unit_scale(_one(form, "unit_scale"))
     group = _one(form, "unit_group")
-    if scale is None or not set_unit(app.store.conn, rcept_no, dcm_no, group, scale):
+    if scale is None or not set_unit(
+        app.store.conn, rcept_no, dcm_no, group, scale, capture_pass=capture_pass
+    ):
         return _html(start_response, "400 Bad Request", "단위가 아닙니다.")
-    return _see_other(start_response, rcept_no, dcm_no)
+    return _see_other(start_response, rcept_no, dcm_no, base)
 
 
 def _index(raw: str) -> int | None:
@@ -621,6 +665,9 @@ def _post_complete(
     start_response: Any,
     rcept_no: str,
     dcm_no: str,
+    *,
+    capture_pass: int = 1,
+    base: str = "doc",
 ) -> list[bytes]:
     if not _host_allowed(environ) or not _origin_allowed(environ):
         return _reject(start_response)
@@ -629,10 +676,14 @@ def _post_complete(
         return _reject(start_response)
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    if capture_pass == 2:
+        closed = _recapture_closed(app, rcept_no, dcm_no, start_response)
+        if closed is not None:
+            return closed
     blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
     if blocked is not None:
         return blocked
-    saved = load_captures(app.store.conn, rcept_no, dcm_no)
+    saved = load_captures(app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass)
     missing = [
         row.label
         for row in capture_rows()
@@ -645,6 +696,9 @@ def _post_complete(
             "400 Bad Request",
             f'<ul id="missing-rows">{items}</ul>',
         )
+    if capture_pass == 2:
+        finish_recapture(app.store.conn, rcept_no, dcm_no)
+        return _see_other(start_response, rcept_no, dcm_no, base)
     app.store.conn.execute(
         """
         UPDATE gold_samples
@@ -655,7 +709,7 @@ def _post_complete(
         (datetime.now(UTC).isoformat(), rcept_no, dcm_no),
     )
     app.store.conn.commit()
-    return _see_other(start_response, rcept_no, dcm_no)
+    return _see_other(start_response, rcept_no, dcm_no, base)
 
 
 def _next_document(
@@ -702,9 +756,244 @@ def _unit_scale(raw: str) -> int | None:
         return None
 
 
-def _see_other(start_response: Any, rcept_no: str, dcm_no: str) -> list[bytes]:
-    location = f"/doc/{quote(rcept_no)}/{quote(dcm_no)}"
+def _see_other(
+    start_response: Any, rcept_no: str, dcm_no: str, base: str = "doc"
+) -> list[bytes]:
+    location = f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}"
     return _html(start_response, "303 See Other", "저장했습니다.", [("Location", location)])
+
+
+def _recapture(
+    app: ReviewApplication,
+    environ: dict[str, Any],
+    start_response: Any,
+    method: str,
+    parts: list[str],
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    if parts == ["next"] and method == "GET":
+        return _next_recapture_document(app, start_response, query)
+    if parts == ["report"] and method == "GET":
+        return _recapture_report(app, start_response, query)
+    if parts == ["adjudication"] and method == "GET":
+        return _adjudication_page(app, start_response, query)
+    if parts == ["adjudicate"] and method == "POST":
+        return _post_adjudicate(app, environ, start_response)
+    if (
+        len(parts) == 3
+        and parts[2] in {"capture", "unit", "complete"}
+        and _safe_id(parts[0])
+        and _safe_id(parts[1])
+    ):
+        if method != "POST":
+            return _html(
+                start_response,
+                "405 Method Not Allowed",
+                "POST만 받습니다.",
+                [("Allow", "POST")],
+            )
+        if parts[2] == "capture":
+            return _post_capture(
+                app,
+                environ,
+                start_response,
+                parts[0],
+                parts[1],
+                capture_pass=2,
+                base="recapture",
+            )
+        if parts[2] == "complete":
+            return _post_complete(
+                app,
+                environ,
+                start_response,
+                parts[0],
+                parts[1],
+                capture_pass=2,
+                base="recapture",
+            )
+        return _post_unit(
+            app,
+            environ,
+            start_response,
+            parts[0],
+            parts[1],
+            capture_pass=2,
+            base="recapture",
+        )
+    if method != "GET":
+        return _html(
+            start_response,
+            "405 Method Not Allowed",
+            "GET만 받습니다.",
+            [("Allow", "GET")],
+        )
+    if len(parts) == 2 and _safe_id(parts[0]) and _safe_id(parts[1]):
+        sample = app.store.sample(parts[0], parts[1])
+        if sample is None:
+            return _html(start_response, "404 Not Found", "문서가 없습니다.")
+        if not can_open_recapture(
+            app.store.conn, str(sample["run_id"]), parts[0], parts[1]
+        ):
+            return _html(start_response, "409 Conflict", "재입수 대상이 아닙니다.")
+        page = _capture_document(
+            app, parts[0], parts[1], query, capture_pass=2, base="recapture"
+        )
+        if page is None:
+            return _html(start_response, "404 Not Found", "문서가 없습니다.")
+        return _html(start_response, "200 OK", page)
+    return _html(start_response, "404 Not Found", "페이지가 없습니다.")
+
+
+def _recapture_closed(
+    app: ReviewApplication,
+    rcept_no: str,
+    dcm_no: str,
+    start_response: Any,
+) -> list[bytes] | None:
+    sample = app.store.sample(rcept_no, dcm_no)
+    if sample is None:
+        return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    if can_open_recapture(app.store.conn, str(sample["run_id"]), rcept_no, dcm_no):
+        return None
+    return _html(start_response, "409 Conflict", "재입수 대상이 아닙니다.")
+
+
+def _next_recapture_document(
+    app: ReviewApplication,
+    start_response: Any,
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    period = _one(query, "period")
+    if not period:
+        return _html(start_response, "400 Bad Request", "기간이 없습니다.")
+    found = next_recapture(app.store.conn, period)
+    if found is None:
+        return _html(start_response, "404 Not Found", "다음 문서가 없습니다.")
+    rcept_no, dcm_no = found
+    location = f"/recapture/{quote(rcept_no)}/{quote(dcm_no)}"
+    return _html(start_response, "303 See Other", "다음 문서입니다.", [("Location", location)])
+
+
+def _recapture_report(
+    app: ReviewApplication,
+    start_response: Any,
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    run_id = _one(query, "run")
+    if not run_id:
+        return _html(start_response, "400 Bad Request", "실행이 없습니다.")
+    rows = consistency_report(app.store.conn, run_id)
+    body = "".join(
+        (
+            "<tr "
+            f'data-period="{html.escape(row.period, quote=True)}" '
+            f'data-bundle="{html.escape(row.bundle, quote=True)}" '
+            f'data-subject="{html.escape(row.subject, quote=True)}">'
+            f'<td class="n">{row.n}</td>'
+            f'<td class="agree">{row.agree}</td>'
+            f'<td class="rate">{row.rate:.10f}</td>'
+            f'<td class="wilson">{row.wilson_lo:.10f}</td>'
+            "</tr>"
+        )
+        for row in rows
+    )
+    page = _page(
+        "재입수 일치",
+        f'<table id="consistency-report"><tbody>{body}</tbody></table>',
+    )
+    return _html(start_response, "200 OK", page)
+
+
+def _adjudication_page(
+    app: ReviewApplication,
+    start_response: Any,
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    run_id = _one(query, "run")
+    if not run_id:
+        return _html(start_response, "400 Bad Request", "실행이 없습니다.")
+    decided = {
+        (str(row["rcept_no"]), str(row["dcm_no"]), str(row["bundle"]), str(row["subject"]))
+        for row in app.store.conn.execute(
+            "SELECT rcept_no, dcm_no, bundle, subject FROM gold_adjudications"
+        )
+    }
+    pending = [
+        item
+        for item in disagreements(app.store.conn, run_id)
+        if (item.rcept_no, item.dcm_no, item.bundle, item.subject) not in decided
+    ]
+    forms = "".join(_adjudication_form(app.token, run_id, item) for item in pending)
+    if not forms:
+        forms = '<p id="adjudication-empty">판정할 항목이 없습니다.</p>'
+    return _html(start_response, "200 OK", _page("재입수 판정", forms))
+
+
+def _adjudication_form(token: str, run_id: str, item: Any) -> str:
+    hidden = (
+        f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
+        f'<input type="hidden" name="run_id" value="{html.escape(run_id, quote=True)}">'
+        f'<input type="hidden" name="rcept_no" value="{html.escape(item.rcept_no, quote=True)}">'
+        f'<input type="hidden" name="dcm_no" value="{html.escape(item.dcm_no, quote=True)}">'
+        f'<input type="hidden" name="bundle" value="{html.escape(item.bundle, quote=True)}">'
+        f'<input type="hidden" name="subject" value="{html.escape(item.subject, quote=True)}">'
+    )
+    return (
+        '<form method="post" action="/recapture/adjudicate">'
+        f"{hidden}"
+        f"<p>{html.escape(item.rcept_no)}/{html.escape(item.dcm_no)} "
+        f"{html.escape(item.bundle)} {html.escape(item.subject)}</p>"
+        f'<p class="pass-1">{html.escape(_label_text(item.first))}</p>'
+        f'<p class="pass-2">{html.escape(_label_text(item.second))}</p>'
+        '<label><input type="radio" name="chosen_pass" value="1"> 1차</label>'
+        '<label><input type="radio" name="chosen_pass" value="2"> 2차</label>'
+        '<input name="note">'
+        '<button type="submit">판정</button>'
+        "</form>"
+    )
+
+
+def _label_text(label: Label | None) -> str:
+    if label is None:
+        return "기록 없음"
+    return f"{label.verdict} {json.dumps(label.gold_value, ensure_ascii=False)}"
+
+
+def _post_adjudicate(
+    app: ReviewApplication,
+    environ: dict[str, Any],
+    start_response: Any,
+) -> list[bytes]:
+    if not _host_allowed(environ) or not _origin_allowed(environ):
+        return _reject(start_response)
+    form = _form_body(environ)
+    if not _token_ok(app.token, _one(form, "token")):
+        return _reject(start_response)
+    rcept_no = _one(form, "rcept_no")
+    dcm_no = _one(form, "dcm_no")
+    if app.store.sample(rcept_no, dcm_no) is None:
+        return _html(start_response, "404 Not Found", "문서가 없습니다.")
+    blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
+    if blocked is not None:
+        return blocked
+    chosen = _one(form, "chosen_pass")
+    note = _one(form, "note")
+    if chosen not in {"1", "2"} or not note.strip():
+        return _html(start_response, "400 Bad Request", "판정할 수 없습니다.")
+    if not save_adjudication(
+        app.store.conn,
+        rcept_no,
+        dcm_no,
+        _one(form, "bundle"),
+        _one(form, "subject"),
+        int(chosen),
+        note,
+        run_id=_one(form, "run_id"),
+    ):
+        return _html(start_response, "400 Bad Request", "판정할 수 없습니다.")
+    location = f"/recapture/adjudication?run={quote(_one(form, 'run_id'))}"
+    return _html(start_response, "303 See Other", "판정했습니다.", [("Location", location)])
 
 
 if __name__ == "__main__":

@@ -167,6 +167,9 @@ def test_blind_document_becomes_eligible_after_twenty_later_finishes(tmp_path) -
     assert eligible(conn, "run", "TARGET", "D") is True
     assert eligible(conn, "run", "PREFILL", "D") is False
     assert eligible(conn, "run", "OTHER-PERIOD", "D") is False
+    _sample(conn, "RESERVE", finished="2026-01-01T00:00:00+00:00", queue=4, role="reserve")
+    conn.commit()
+    assert eligible(conn, "run", "RESERVE", "D") is False
 
 
 def test_consistency_rules_drop_double_gaps_and_sum_periods(tmp_path) -> None:
@@ -244,6 +247,11 @@ def test_consistency_rules_drop_double_gaps_and_sum_periods(tmp_path) -> None:
     _cell(conn, "A", "company_name", "value", "not_applicable", None, capture_pass=2)
     _cell(conn, "A", "audit_report_date", "value", "found", "2024-03-15T09:00:00")
     _cell(conn, "A", "audit_report_date", "value", "found", "2024-03-15", capture_pass=2)
+    _cell(conn, "A", "communications", "has_audit_committee", "not_applicable", None)
+    _cell(conn, "A", "communications", "items", "not_applicable", None)
+    _cell(conn, "A", "communications", "has_audit_committee", "found", True, capture_pass=2)
+    _cell(conn, "A", "fiscal_term", "value", "found", "제10기")
+    _cell(conn, "A", "fiscal_term", "value", "found", "제11기", capture_pass=2)
     _cell(conn, "B", "auditor", "value", "found", "삼일")
     _cell(conn, "B", "auditor", "value", "found", "한영", capture_pass=2)
     _cell(conn, "B", "going_concern", "value", "found", 1)
@@ -274,6 +282,8 @@ def test_consistency_rules_drop_double_gaps_and_sum_periods(tmp_path) -> None:
     assert _row(report, "P1", "opinion", "value").agree == 0
     assert _row(report, "P1", "company_name", "value").agree == 1
     assert _row(report, "P1", "audit_report_date", "value").agree == 1
+    assert _row(report, "P1", "communications", "table").agree == 0
+    assert _row(report, "P1", "fiscal_term", "value").agree == 0
     assert not any(item.bundle == "subsidiary" for item in report)
     assert not any(
         item.period == "P1" and item.bundle == "auditor" and item.n == 2 for item in report
