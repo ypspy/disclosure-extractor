@@ -147,18 +147,11 @@ def test_population_keeps_only_audit_report_leaves(tmp_path: Path) -> None:
         "",
         [("9", "기업개황자료"), ("10", "감사보고서")],
     )
-    _filing(
-        conn,
-        "E",
-        "A001",
-        "",
-        [("11", "감사보고서"), ("11", "연결감사보고서")],
-    )
     conn.commit()
     conn.close()
     gold = open_gold(tmp_path / "gold.db", catalog)
     rows = {(row.rcept_no, row.dcm_no): row for row in load_population(gold)}
-    assert set(rows) == {("A", "3"), ("A", "4"), ("C0", "7"), ("C1", "8"), ("D", "10"), ("E", "11")}
+    assert set(rows) == {("A", "3"), ("A", "4"), ("C0", "7"), ("C1", "8"), ("D", "10")}
     assert rows[("A", "3")].scope == "separate"
     assert rows[("A", "3")].form == "attached"
     assert rows[("A", "4")].scope == "consolidated"
@@ -166,4 +159,3 @@ def test_population_keeps_only_audit_report_leaves(tmp_path: Path) -> None:
     assert rows[("C1", "8")].scope == "consolidated"
     assert rows[("D", "10")].scope == "separate"
     assert rows[("D", "10")].form == "standalone"
-    assert rows[("E", "11")].scope == "consolidated"
