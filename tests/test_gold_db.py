@@ -25,6 +25,8 @@ def test_migrate_creates_tables(tmp_path) -> None:
         "gold_label_history",
         "gold_scores",
         "extractor_snapshots",
+        "gold_captures",
+        "gold_capture_units",
     } <= names
 
 

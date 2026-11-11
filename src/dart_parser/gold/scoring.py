@@ -15,6 +15,7 @@ from dart_parser.gold.periods import FLAGGED_SAMPLE_PERIODS
 from dart_parser.gold.sampler import is_claim
 from dart_parser.gold.snapshots import load_snapshot, versions
 from dart_parser.gold.subjects import TABLE_BUNDLES, extract_predicted
+from dart_parser.normalizer.cleaner import normalize_text
 
 _PASS_LINE = 0.99
 
@@ -157,18 +158,24 @@ def _outcome(verdict: str, claim: bool, agreed: bool) -> str:
     return "fp"
 
 
-def score(conn: sqlite3.Connection, version: str) -> int:
-    """최종 라벨과 스냅샷으로 gold_scores를 다시 만든다."""
+def score(conn: sqlite3.Connection, version: str, source: str = "labels") -> int:
+    """최종 라벨 또는 입수 값과 스냅샷으로 gold_scores를 다시 만든다."""
+    if source not in {"labels", "captures"}:
+        raise ValueError(f"unknown score source: {source}")
     conn.execute("DELETE FROM gold_scores WHERE extractor_version = ?", (version,))
     scored_at = datetime.now(UTC).isoformat()
     count = 0
-    for label in gold_final(conn):
+    labels = gold_final(conn) if source == "labels" else capture_labels(conn)
+    for label in labels:
         snapshot = load_snapshot(conn, version, label.rcept_no, label.dcm_no)
         if snapshot is None:
             continue
         predicted = extract_predicted(snapshot, label.bundle, label.subject)
         claim = is_claim(snapshot, label.bundle, label.subject)
-        agreed = matches(label.bundle, label.subject, predicted, label.gold_value)
+        if source == "captures":
+            agreed = _capture_agreed(label, predicted)
+        else:
+            agreed = matches(label.bundle, label.subject, predicted, label.gold_value)
         outcome = _outcome(label.verdict, claim, agreed)
         conn.execute(
             """
@@ -427,6 +434,32 @@ def _canon(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _intake_hours_keys(table: Any) -> tuple[Any, Any]:
+    """입수 채점의 당기 합계. role_key·metric_key가 없으면 role·metric을 쓴다."""
+    audit = None
+    headcount = None
+    if not isinstance(table, list):
+        return (audit, headcount)
+    for cell in table:
+        if not isinstance(cell, dict):
+            continue
+        role = _cell_key(cell, "role_key", "role")
+        metric = _cell_key(cell, "metric_key", "metric")
+        if role != "total" or cell.get("period") != "current":
+            continue
+        if metric in {"audit_hours", "audit"}:
+            audit = cell.get("value")
+        if metric == "headcount":
+            headcount = cell.get("value")
+    return (audit, headcount)
+
+
+def _cell_key(cell: dict[str, Any], key: str, old: str) -> Any:
+    if key not in cell:
+        return cell.get(old)
+    return cell.get(key)
+
+
 def _hours_keys(table: Any) -> tuple[Any, Any]:
     """총 감사시간·투입 인원(당기, 합계)."""
     audit = None
@@ -557,3 +590,176 @@ def rescore(conn: sqlite3.Connection, new_version: str) -> int:
     if older:
         table_carryover(conn, older[0], new_version)
     return written
+
+
+def capture_labels(conn: sqlite3.Connection, capture_pass: int = 1) -> Iterator[Label]:
+    """입수가 끝난 문서의 칸을 채점 subject 단위 라벨로 바꾼다.
+
+    ``capture_pass``는 나중 재입수용이다. 1이 아니면 지금 테이블을 읽지 않는다.
+    """
+    if capture_pass != 1:
+        return
+    docs = conn.execute(
+        """
+        SELECT DISTINCT rcept_no, dcm_no
+        FROM gold_samples
+        WHERE status = 'done'
+        """
+    ).fetchall()
+    grouped = _capture_groups()
+    for doc in docs:
+        rows = _capture_rows_for(conn, str(doc["rcept_no"]), str(doc["dcm_no"]))
+        for bundle, subjects in grouped.items():
+            for subject in subjects:
+                label = _capture_label(
+                    str(doc["rcept_no"]), str(doc["dcm_no"]), bundle, subject, rows
+                )
+                if label is not None:
+                    yield label
+
+
+def _capture_groups() -> dict[str, list[str]]:
+    from dart_parser.gold.subjects import BUNDLE_KEYS, subjects_for
+
+    return {bundle: subjects_for(bundle) for bundle in BUNDLE_KEYS}
+
+
+def _capture_rows_for(
+    conn: sqlite3.Connection, rcept_no: str, dcm_no: str
+) -> dict[tuple[str, str], sqlite3.Row]:
+    found = conn.execute(
+        """
+        SELECT bundle, subject, status, value
+        FROM gold_captures
+        WHERE rcept_no = ? AND dcm_no = ?
+        """,
+        (rcept_no, dcm_no),
+    ).fetchall()
+    return {(str(row["bundle"]), str(row["subject"])): row for row in found}
+
+
+def _capture_label(
+    rcept_no: str,
+    dcm_no: str,
+    bundle: str,
+    subject: str,
+    rows: dict[tuple[str, str], sqlite3.Row],
+) -> Label | None:
+    if bundle in TABLE_BUNDLES and subject == "table":
+        return _table_label(rcept_no, dcm_no, bundle, rows)
+    row = rows.get((bundle, subject))
+    if row is None or row["status"] == "not_in_regime":
+        return None
+    if bundle == "going_concern" and row["status"] == "not_applicable":
+        return _label(rcept_no, dcm_no, bundle, subject, "value", 0)
+    if row["status"] == "not_applicable":
+        return _label(rcept_no, dcm_no, bundle, subject, "na", None)
+    if row["status"] != "found":
+        return None
+    value = _loads(row["value"])
+    return _label(rcept_no, dcm_no, bundle, subject, "value", value)
+
+
+def _table_label(
+    rcept_no: str,
+    dcm_no: str,
+    bundle: str,
+    rows: dict[tuple[str, str], sqlite3.Row],
+) -> Label | None:
+    if bundle == "hours":
+        return _hours_label(rcept_no, dcm_no, rows)
+    cells = [rows[key] for key in rows if key[0] == bundle]
+    if not cells:
+        return None
+    if any(row["status"] == "found" for row in cells):
+        return _label(rcept_no, dcm_no, bundle, "table", "value", True)
+    if all(row["status"] == "not_in_regime" for row in cells):
+        return None
+    if any(row["status"] == "not_applicable" for row in cells):
+        return _label(rcept_no, dcm_no, bundle, "table", "na", None)
+    return None
+
+
+def _hours_label(
+    rcept_no: str,
+    dcm_no: str,
+    rows: dict[tuple[str, str], sqlite3.Row],
+) -> Label | None:
+    audit = _hours_slot(rows, ("total|audit|current", "total|audit_hours|current"))
+    headcount = _hours_slot(rows, ("total|headcount|current",))
+    slots = [slot for slot in (audit, headcount) if slot is not None]
+    if not slots:
+        return None
+    if all(slot["status"] == "not_in_regime" for slot in slots):
+        return None
+    if any(slot["status"] == "found" for slot in slots):
+        return _label(
+            rcept_no,
+            dcm_no,
+            "hours",
+            "table",
+            "value",
+            [_slot_number(audit), _slot_number(headcount)],
+        )
+    if any(slot["status"] == "not_applicable" for slot in slots):
+        return _label(rcept_no, dcm_no, "hours", "table", "na", None)
+    return None
+
+
+def _hours_slot(
+    rows: dict[tuple[str, str], sqlite3.Row], subjects: tuple[str, ...]
+) -> sqlite3.Row | None:
+    for subject in subjects:
+        row = rows.get(("hours", subject))
+        if row is not None:
+            return row
+    return None
+
+
+def _slot_number(row: sqlite3.Row | None) -> Any:
+    if row is None or row["status"] != "found" or not row["value"]:
+        return None
+    return _loads(row["value"])
+
+
+def _label(
+    rcept_no: str, dcm_no: str, bundle: str, subject: str, verdict: str, gold_value: Any
+) -> Label:
+    return Label(
+        rcept_no=rcept_no,
+        dcm_no=dcm_no,
+        bundle=bundle,
+        subject=subject,
+        pass_="capture",
+        verdict=verdict,
+        gold_value=gold_value,
+        shown_value=None,
+    )
+
+
+def _capture_agreed(label: Label, predicted: Any) -> bool:
+    if label.bundle == "hours" and label.subject == "table":
+        wanted = label.gold_value
+        if not isinstance(wanted, list) or len(wanted) != 2:
+            return False
+        return _intake_hours_keys(predicted) == (wanted[0], wanted[1])
+    if label.bundle in {"activities", "communications"} and label.subject == "table":
+        return predicted is not None
+    if label.bundle == "notes_toc":
+        return _notes_agree(predicted, label.gold_value)
+    return matches(label.bundle, label.subject, predicted, label.gold_value)
+
+
+def _notes_agree(predicted: Any, gold_value: Any) -> bool:
+    if not isinstance(gold_value, dict):
+        return False
+    gold_titles = [normalize_text(str(title)) for title in gold_value.get("titles") or []]
+    if isinstance(predicted, dict):
+        pred_titles = [normalize_text(str(title)) for title in predicted.get("titles") or []]
+        pred_count = predicted.get("count")
+    elif isinstance(predicted, list):
+        pred_titles = [normalize_text(str(title)) for title in predicted]
+        pred_count = len(pred_titles)
+    else:
+        return False
+    return pred_count == gold_value.get("count") and pred_titles == gold_titles

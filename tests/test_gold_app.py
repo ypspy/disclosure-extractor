@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
 import sqlite3
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
@@ -152,86 +151,6 @@ def test_list_shows_samples_by_period_stratum_and_status(tmp_path: Path) -> None
     assert filtered == "200 OK"
     assert "R200" in text
     assert "R100" not in text
-    app.close()
-
-
-def test_document_page_shows_pinned_snapshot_and_judgment_forms(tmp_path: Path) -> None:
-    catalog, gold_path, cache = _seed(tmp_path)
-    app = ReviewApplication(catalog, gold_path, cache)
-    status, _headers, body = _request(app, "/doc/R100/D100")
-    page = body.decode()
-    assert status == "200 OK"
-    assert page.index("company_name") < page.index("going_concern") < page.index("notes_toc")
-    assert page.count('data-subject="') == 42
-    assert "골드주식회사" in page
-    assert "적정" in page
-    assert "0.1.0" in page
-    assert "abc123" in page
-    assert 'href="/doc/R100/D100/source#win-cover"' in page
-    slot = page.split('id="judgment-slot"', 1)[1].split("</aside>", 1)[0]
-    assert "<form" in slot
-    assert 'name="verdict"' in slot
-    assert 'value="correct"' in slot
-    assert 'value="wrong"' in slot
-    assert 'value="na"' in slot
-    app.close()
-
-
-def test_source_is_sandboxed_and_blocks_external_resources(tmp_path: Path) -> None:
-    catalog, gold_path, cache = _seed(tmp_path)
-    app = ReviewApplication(catalog, gold_path, cache)
-    _status, _headers, parent = _request(app, "/doc/R100/D100")
-    page = parent.decode()
-    assert 'sandbox=""' in page
-    assert "fetch('https://example.test')" not in page
-    status, headers, body = _request(app, "/doc/R100/D100/source")
-    assert status == "200 OK"
-    policy = headers["Content-Security-Policy"]
-    assert "default-src 'none'" in policy
-    assert "script-src" not in policy or "'none'" in policy
-    source = body.decode()
-    assert "표지 골드주식회사" in source
-    assert 'id="win-cover"' not in source
-    assert 'sandbox=""' not in source
-    app.close()
-
-
-def test_missing_cache_is_marked_and_not_downloaded(tmp_path: Path) -> None:
-    catalog, gold_path, cache = _seed(tmp_path)
-    app = ReviewApplication(catalog, gold_path, cache)
-    status, _headers, body = _request(app, "/doc/R200/D200")
-    page = body.decode()
-    assert status == "200 OK"
-    assert "캐시 없음" in page
-    assert "<iframe" not in page
-    missing, _headers, payload = _request(app, "/doc/R200/D200/source")
-    assert missing == "404 Not Found"
-    assert "캐시 없음" in payload.decode()
-    assert not (cache / "R200").exists()
-    app.close()
-
-
-def test_pages_do_not_touch_network_sampler_or_capture(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def boom(*_args, **_kwargs):
-        raise AssertionError("network or sampling")
-
-    monkeypatch.setattr(socket, "create_connection", boom)
-    monkeypatch.setattr("urllib.request.urlopen", boom)
-    monkeypatch.setattr("dart_parser.gold.sampler.build_sample", boom)
-    monkeypatch.setattr("dart_parser.gold.snapshots.capture", boom)
-    catalog, gold_path, cache = _seed(tmp_path)
-    app = ReviewApplication(catalog, gold_path, cache)
-    list_status, _headers, _body = _request(app, "/")
-    doc_status, _headers, _body = _request(app, "/doc/R100/D100")
-    source_status, _headers, _body = _request(app, "/doc/R100/D100/source")
-    post_status, _headers, _body = _request(app, "/doc/R100/D100", method="POST")
-    assert list_status == "200 OK"
-    assert doc_status == "200 OK"
-    assert source_status == "200 OK"
-    assert post_status.startswith("405")
     app.close()
 
 

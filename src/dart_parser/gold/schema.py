@@ -114,4 +114,39 @@ MIGRATIONS: tuple[str, ...] = (
         extractor_commit TEXT NOT NULL
     );
     """,
+    """
+CREATE TABLE gold_captures (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    value TEXT,
+    evidence TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (rcept_no, dcm_no, bundle, subject)
+);
+
+CREATE TABLE gold_capture_units (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    unit_group VARCHAR(8) NOT NULL,
+    unit_scale INTEGER NOT NULL,
+    PRIMARY KEY (rcept_no, dcm_no, unit_group)
+);
+""",
+    """
+CREATE TABLE gold_capture_history (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    value TEXT,
+    evidence TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    superseded_at TEXT NOT NULL
+);
+""",
 )
