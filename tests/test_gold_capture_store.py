@@ -142,6 +142,136 @@ def test_overwrite_and_clear_keep_history(tmp_path) -> None:
     assert load_captures(conn, "R", "D") == {}
 
 
+def _sample(
+    conn, *, status: str = "done", finished_at: str | None = "2026-01-01T00:00:00+00:00"
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO gold_runs (
+            run_id, seed, created_at, population_sql_sha, db_snapshot, params, stats
+        ) VALUES ('run', 'seed', '2026-11-11T00:00:00+00:00', 'x', NULL, '{}', '{}')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_samples (
+            run_id, rcept_no, dcm_no, period, stratum, stratum_weight, sample_hash,
+            mode, role, queue_order, status, meta, started_at, finished_at
+        ) VALUES (
+            'run', 'R', 'D', 'P1', 's', 1, 'h', 'blind', 'main', 1, ?, '{}',
+            '2026-01-01T00:00:00+00:00', ?
+        )
+        """,
+        (status, finished_at),
+    )
+    conn.commit()
+
+
+def test_second_pass_does_not_change_first_pass_or_sample_status(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    _sample(conn)
+    assert save_capture(conn, "R", "D", "company_name", "value", "1차값")
+    assert save_capture(conn, "R", "D", "company_name", "value", "2차값", capture_pass=2)
+    assert set_unit(conn, "R", "D", "bs", 1_000, capture_pass=2)
+    first = load_captures(conn, "R", "D")[("company_name", "value")]
+    second = load_captures(conn, "R", "D", capture_pass=2)[("company_name", "value")]
+    assert json.loads(first["value"]) == "1차값"
+    assert json.loads(second["value"]) == "2차값"
+    assert load_units(conn, "R", "D") == {}
+    assert load_units(conn, "R", "D", capture_pass=2) == {"bs": 1_000}
+    assert conn.execute("SELECT count(*) FROM gold_capture_history").fetchone()[0] == 0
+    assert conn.execute("SELECT status FROM gold_samples").fetchone()[0] == "done"
+    recapture = conn.execute(
+        "SELECT status, finished_at FROM gold_recapture_status"
+    ).fetchone()
+    assert recapture[0] == "in_progress"
+    assert recapture[1] is None
+
+
+def test_second_pass_keeps_history_and_rolls_back(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    _sample(conn)
+    save_capture(conn, "R", "D", "company_name", "value", "가나", capture_pass=2)
+    save_capture(conn, "R", "D", "company_name", "value", "다라", capture_pass=2)
+    conn.execute(
+        """
+        CREATE TRIGGER boom BEFORE UPDATE ON gold_recaptures
+        BEGIN
+            SELECT RAISE(ABORT, 'boom');
+        END
+        """
+    )
+    with pytest.raises(sqlite3.Error):
+        save_capture(conn, "R", "D", "company_name", "value", "마바", capture_pass=2)
+    row = load_captures(conn, "R", "D", capture_pass=2)[("company_name", "value")]
+    assert json.loads(row["value"]) == "다라"
+    history = conn.execute(
+        "SELECT action FROM gold_recapture_history ORDER BY rowid"
+    ).fetchall()
+    assert [item[0] for item in history] == ["update"]
+    assert conn.execute("SELECT count(*) FROM gold_captures").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM gold_capture_history").fetchone()[0] == 0
+
+
+def test_clearing_the_last_title_or_round_returns_to_before_capture(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    _sample(conn)
+    save_capture(conn, "R", "D", "notes_toc", "value", "마지막 제목")
+    from dart_parser.gold.capture_store import remove_list_item
+
+    assert remove_list_item(conn, "R", "D", "notes_toc", "value", 0)
+    assert ("notes_toc", "value") not in load_captures(conn, "R", "D")
+    history = conn.execute(
+        "SELECT action FROM gold_capture_history ORDER BY rowid"
+    ).fetchall()
+    assert history[-1][0] == "clear"
+    sample = conn.execute("SELECT status, finished_at FROM gold_samples").fetchone()
+    assert sample[0] == "in_progress"
+    assert sample[1] is None
+
+    conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'done', finished_at = '2026-01-02T00:00:00+00:00'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE gold_recapture_status
+        SET status = 'done', finished_at = '2026-03-01T00:00:00+00:00'
+        WHERE run_id = 'run'
+        """
+    )
+    conn.commit()
+    save_capture(conn, "R", "D", "communications", "items", "마지막 회차", capture_pass=2)
+    conn.execute(
+        """
+        UPDATE gold_recapture_status
+        SET status = 'done', finished_at = '2026-03-01T00:00:00+00:00'
+        """
+    )
+    conn.execute(
+        """
+        UPDATE gold_samples
+        SET status = 'done', finished_at = '2026-01-02T00:00:00+00:00'
+        """
+    )
+    conn.commit()
+    assert remove_list_item(conn, "R", "D", "communications", "items", 0, capture_pass=2)
+    assert load_captures(conn, "R", "D", capture_pass=2) == {}
+    action = conn.execute(
+        "SELECT action FROM gold_recapture_history ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+    assert action == "clear"
+    recapture = conn.execute(
+        "SELECT status, finished_at FROM gold_recapture_status"
+    ).fetchone()
+    assert recapture[0] == "in_progress"
+    assert recapture[1] is None
+    sample = conn.execute("SELECT status FROM gold_samples").fetchone()
+    assert sample[0] == "done"
+
+
 def test_failed_overwrite_rolls_back_capture_and_history(tmp_path) -> None:
     conn = _conn(tmp_path)
     save_capture(conn, "R", "D", "company_name", "value", "가나")
