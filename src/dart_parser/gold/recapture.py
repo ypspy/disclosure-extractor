@@ -87,6 +87,18 @@ def recapture_in_progress(conn: sqlite3.Connection, rcept_no: str, dcm_no: str) 
     return row is not None
 
 
+def recapture_done(conn: sqlite3.Connection, rcept_no: str, dcm_no: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM gold_recapture_status
+        WHERE rcept_no = ? AND dcm_no = ? AND status = 'done'
+        LIMIT 1
+        """,
+        (rcept_no, dcm_no),
+    ).fetchone()
+    return row is not None
+
+
 def can_open_recapture(conn: sqlite3.Connection, run_id: str, rcept_no: str, dcm_no: str) -> bool:
     """재입수 행이 있으면 대상 조건과 상관없이 이어 할 수 있다."""
     started = conn.execute(
@@ -324,16 +336,6 @@ def _label_pair(
         for label in document_labels(rcept_no, dcm_no, right_rows)
     }
     return left, right
-
-
-def _stored_rows(
-    conn: sqlite3.Connection, rcept_no: str, dcm_no: str, capture_pass: int
-) -> dict[tuple[str, str], dict[str, Any]]:
-    loaded = load_captures(conn, rcept_no, dcm_no, capture_pass=capture_pass)
-    return {
-        key: {"status": row["status"], "value": row["value"]}
-        for key, row in loaded.items()
-    }
 
 
 def _stored_rows(

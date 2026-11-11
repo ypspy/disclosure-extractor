@@ -47,6 +47,7 @@ from dart_parser.gold.recapture import (
     consistency_report,
     disagreements,
     next_recapture,
+    recapture_done,
     recapture_in_progress,
     recapture_progress,
     save_adjudication,
@@ -557,6 +558,9 @@ def _post_capture(
     form = _form_body(environ)
     if not _token_ok(app.token, _one(form, "token")):
         return _reject(start_response)
+    locked = _pass_write_locked(app, rcept_no, dcm_no, capture_pass, start_response)
+    if locked is not None:
+        return locked
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
     if capture_pass == 2:
@@ -624,6 +628,9 @@ def _post_unit(
     form = _form_body(environ)
     if not _token_ok(app.token, _one(form, "token")):
         return _reject(start_response)
+    locked = _pass_write_locked(app, rcept_no, dcm_no, capture_pass, start_response)
+    if locked is not None:
+        return locked
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
     if capture_pass == 2:
@@ -674,6 +681,9 @@ def _post_complete(
     form = _form_body(environ)
     if not _token_ok(app.token, _one(form, "token")):
         return _reject(start_response)
+    locked = _pass_write_locked(app, rcept_no, dcm_no, capture_pass, start_response)
+    if locked is not None:
+        return locked
     if app.store.sample(rcept_no, dcm_no) is None:
         return _html(start_response, "404 Not Found", "문서가 없습니다.")
     if capture_pass == 2:
@@ -843,6 +853,21 @@ def _recapture(
             return _html(start_response, "404 Not Found", "문서가 없습니다.")
         return _html(start_response, "200 OK", page)
     return _html(start_response, "404 Not Found", "페이지가 없습니다.")
+
+
+def _pass_write_locked(
+    app: ReviewApplication,
+    rcept_no: str,
+    dcm_no: str,
+    capture_pass: int,
+    start_response: Any,
+) -> list[bytes] | None:
+    """토큰 검사 다음, 저장과 빠진 행 계산보다 먼저 쓰기를 막는다."""
+    if capture_pass == 1 and recapture_in_progress(app.store.conn, rcept_no, dcm_no):
+        return _html(start_response, "409 Conflict", "재입수 중")
+    if capture_pass == 2 and recapture_done(app.store.conn, rcept_no, dcm_no):
+        return _html(start_response, "409 Conflict", "재입수가 끝났습니다")
+    return None
 
 
 def _recapture_closed(

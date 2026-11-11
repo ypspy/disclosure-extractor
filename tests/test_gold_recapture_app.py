@@ -58,6 +58,28 @@ def _raw_post(
     return str(captured["status"]), dict(captured["headers"]), body
 
 
+_FIRST_PASS_TABLES = (
+    "SELECT * FROM gold_captures ORDER BY rcept_no, dcm_no, bundle, subject",
+    "SELECT * FROM gold_samples ORDER BY run_id, rcept_no, dcm_no",
+    "SELECT * FROM gold_capture_units ORDER BY rcept_no, dcm_no, unit_group",
+    "SELECT * FROM gold_capture_history ORDER BY rowid",
+)
+_RECAPTURE_TABLES = (
+    "SELECT * FROM gold_recaptures ORDER BY rcept_no, dcm_no, bundle, subject",
+    "SELECT * FROM gold_recapture_units ORDER BY rcept_no, dcm_no, unit_group",
+    "SELECT * FROM gold_recapture_history ORDER BY rowid",
+    "SELECT * FROM gold_recapture_status ORDER BY run_id, rcept_no, dcm_no",
+)
+
+
+def _stored(path: Path, queries: tuple[str, ...]) -> tuple[list[tuple[object, ...]], ...]:
+    conn = sqlite3.connect(path)
+    try:
+        return tuple([tuple(row) for row in conn.execute(query)] for query in queries)
+    finally:
+        conn.close()
+
+
 def _open_status(conn: sqlite3.Connection, rcept: str = "R100", dcm: str = "D100") -> None:
     conn.execute(
         """
@@ -484,6 +506,173 @@ def test_report_is_read_only_and_adjudication_records_history(tmp_path: Path) ->
     assert history == (2, "인원을 따른다")
     current = conn.execute("SELECT chosen_pass FROM gold_adjudications").fetchone()[0]
     assert current == 1
+    conn.close()
+    app.close()
+
+
+def test_first_pass_posts_stay_409_while_recapture_is_in_progress(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS1-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS1-CELL-ZZ", ensure_ascii=False),),
+    )
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES)
+    posts = (
+        (
+            "/doc/R100/D100/capture",
+            {
+                "bundle": "company_name",
+                "subject": "value",
+                "text": "다른회사",
+            },
+        ),
+        (
+            "/doc/R100/D100/unit",
+            {"unit_group": "bs", "unit_scale": "1000"},
+        ),
+        ("/doc/R100/D100/complete", {}),
+    )
+    for path, fields in posts:
+        status, _headers, body = _raw_post(app, path, {"token": app.token, **fields})
+        text = body.decode()
+        assert status.startswith("409")
+        assert text == "재입수 중"
+        assert "missing-rows" not in text
+        assert "PASS1-CELL-ZZ" not in text
+        assert "PASS1-EVIDENCE-ZZ" not in text
+        assert _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES) == before
+    app.close()
+
+
+def test_finished_recapture_unlocks_doc_and_locks_second_pass_writes(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS1-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS1-CELL-ZZ", ensure_ascii=False),),
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES ('R100', 'D100', 'auditor', 'value', 'found', ?, '', 't')
+        """,
+        (json.dumps("1차감사인", ensure_ascii=False),),
+    )
+    _open_status(conn)
+    notes = json.dumps({"count": 2, "titles": ["NOTE-A", "NOTE-B"]}, ensure_ascii=False)
+    rounds = json.dumps(
+        [{"raw": "첫째 회의", "round": 1}, {"raw": "둘째 회의", "round": 2}],
+        ensure_ascii=False,
+    )
+    for row in capture_rows():
+        if (row.bundle, row.subject) == ("auditor", "value"):
+            status_name, value = "found", json.dumps("2차감사인", ensure_ascii=False)
+        elif (row.bundle, row.subject) == ("notes_toc", "value"):
+            status_name, value = "found", notes
+        elif (row.bundle, row.subject) == ("communications", "items"):
+            status_name, value = "found", rounds
+        else:
+            status_name, value = "not_applicable", None
+        conn.execute(
+            """
+            INSERT INTO gold_recaptures (
+                rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+            ) VALUES ('R100', 'D100', ?, ?, ?, ?, '', 't')
+            """,
+            (row.bundle, row.subject, status_name, value),
+        )
+    conn.execute(
+        """
+        INSERT INTO gold_recapture_units (rcept_no, dcm_no, unit_group, unit_scale)
+        VALUES ('R100', 'D100', 'bs', 1000)
+        """
+    )
+    conn.commit()
+    conn.close()
+    done, _headers, _body = _post(app, "/recapture/R100/D100/complete", {})
+    assert done.startswith("303")
+    opened, _headers, page = _request(app, "GET", "/doc/R100/D100")
+    assert opened == "200 OK"
+    assert "PASS1-CELL-ZZ" in page.decode()
+    before = _stored(tmp_path / "gold.db", _RECAPTURE_TABLES)
+    writes = (
+        (
+            "/recapture/R100/D100/capture",
+            {"bundle": "company_name", "subject": "value", "text": "바꾼회사"},
+        ),
+        (
+            "/recapture/R100/D100/unit",
+            {"unit_group": "bs", "unit_scale": "1000000"},
+        ),
+        ("/recapture/R100/D100/complete", {}),
+        (
+            "/recapture/R100/D100/capture",
+            {
+                "bundle": "notes_toc",
+                "subject": "value",
+                "status": "remove_title",
+                "index": "0",
+            },
+        ),
+        (
+            "/recapture/R100/D100/capture",
+            {
+                "bundle": "communications",
+                "subject": "items",
+                "status": "remove_item",
+                "index": "0",
+            },
+        ),
+    )
+    for path, fields in writes:
+        status, _headers, body = _raw_post(app, path, {"token": app.token, **fields})
+        text = body.decode()
+        assert status.startswith("409")
+        assert "missing-rows" not in text
+        assert "PASS1-CELL-ZZ" not in text
+        assert "1차감사인" not in text
+        assert "NOTE-A" not in text
+        assert _stored(tmp_path / "gold.db", _RECAPTURE_TABLES) == before
+    judged, judged_headers, _judged = _raw_post(
+        app,
+        "/recapture/adjudicate",
+        {
+            "token": app.token,
+            "run_id": "run",
+            "rcept_no": "R100",
+            "dcm_no": "D100",
+            "bundle": "auditor",
+            "subject": "value",
+            "chosen_pass": "2",
+            "note": "2차를 고른다",
+        },
+    )
+    assert judged.startswith("303")
+    assert judged_headers["Location"] == "/recapture/adjudication?run=run"
+    assert _stored(tmp_path / "gold.db", _RECAPTURE_TABLES) == before
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    assert conn.execute("SELECT chosen_pass, note FROM gold_adjudications").fetchone() == (
+        2,
+        "2차를 고른다",
+    )
+    assert conn.execute("SELECT status FROM gold_samples").fetchone()[0] == "todo"
     conn.close()
     app.close()
 
