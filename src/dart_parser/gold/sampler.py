@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from dart_parser.gold.audit_document import (
+    audit_document_consolidated_sql,
+    audit_document_predicate_sql,
+    classify_audit_document,
+)
 from dart_parser.gold.db import catalog_file
 from dart_parser.gold.periods import assign_period, layout_era, period_dtd_mismatch
 from dart_parser.gold.subjects import (
@@ -20,17 +25,16 @@ from dart_parser.gold.subjects import (
 )
 from dart_parser.gold.v19_fields import status_attr
 
-POPULATION_SQL = """
+_AUDIT_PREDICATE = audit_document_predicate_sql("e.document_name")
+_AUDIT_CONSOLIDATED = audit_document_consolidated_sql("e.document_name")
+
+POPULATION_SQL = f"""
 SELECT
     d.rcept_no AS rcept_no,
     e.dcm_no AS dcm_no,
     MAX(d.report_type) AS source_report_type,
-    CASE
-        WHEN MAX(d.report_type) = 'F002'
-          OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
-        THEN 'consolidated'
-        ELSE 'separate'
-    END AS fs_scope,
+    MAX(CASE WHEN {_AUDIT_PREDICATE} THEN 1 ELSE 0 END) AS audit_hit,
+    MAX(CASE WHEN {_AUDIT_CONSOLIDATED} THEN 1 ELSE 0 END) AS audit_consolidated,
     '' AS opinion_resolved,
     MAX(d.rcept_dt) AS rcept_dt,
     MAX(d.year_end) AS year_end,
@@ -51,6 +55,7 @@ WHERE d.report_type IN ('F001', 'F002', 'A001')
   AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
   AND IFNULL(e.dcm_no, '') != ''
 GROUP BY d.rcept_no, e.dcm_no
+HAVING audit_hit = 1
 """
 
 _WINDOWS = (
@@ -222,7 +227,7 @@ def _pop_from_sql(record: sqlite3.Row) -> PopRow | None:
     if period == "OUT":
         return None
     report_type = record["source_report_type"] or ""
-    scope = "consolidated" if record["fs_scope"] == "consolidated" else "separate"
+    scope = "consolidated" if int(record["audit_consolidated"] or 0) else "separate"
     form = "attached" if report_type == "A001" else "standalone"
     opinion = (record["opinion_resolved"] or "").strip()
     nonclean = 0 if opinion in {"", "unqualified"} else 1
@@ -434,8 +439,17 @@ def _meta(item: _Chosen, catalog_as_of: str) -> dict[str, Any]:
 
 
 def build_sample(conn: sqlite3.Connection, params: SampleParams | None = None) -> str:
-    """모집단을 읽어 gold_runs·gold_samples를 다시 쓰고 run_id를 돌려준다."""
+    """모집단을 읽어 gold_runs·gold_samples를 쓰고 run_id를 돌려준다.
+
+    같은 run_id가 이미 있으면 지우지 않고 ValueError를 낸다. 새 표본은 새 시드로만 만든다.
+    """
     settings = params or SampleParams()
+    run_id = settings.seed
+    existing = conn.execute(
+        "SELECT 1 FROM gold_runs WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if existing is not None:
+        raise ValueError(f"gold run already exists: {run_id}")
     population = load_population(conn)
     by_period: dict[str, list[PopRow]] = {}
     for row in population:
@@ -479,9 +493,6 @@ def build_sample(conn: sqlite3.Connection, params: SampleParams | None = None) -
         "sparse_fields": [],
         "strata": "period|sub|scope|form|market|kam|opinion|correction|tr",
     }
-    run_id = settings.seed
-    conn.execute("DELETE FROM gold_samples WHERE run_id = ?", (run_id,))
-    conn.execute("DELETE FROM gold_runs WHERE run_id = ?", (run_id,))
     conn.execute(
         """
         INSERT INTO gold_runs (
@@ -561,13 +572,23 @@ def _section_hit(fact: dict[str, Any], bundle: str, subject: str) -> bool:
     names = fact.get("_sections")
     if not isinstance(names, list):
         return False
+    needles = _needles(bundle, subject)
+    documents = fact.get("_documents")
+    if isinstance(documents, list) and len(documents) == len(names):
+        for section, document in zip(names, documents, strict=True):
+            if not any(needle in str(section) for needle in needles):
+                continue
+            if bundle == "subsidiary" and (
+                classify_audit_document(str(document)) != "consolidated"
+            ):
+                continue
+            return True
+        return False
     blob = " ".join(str(name) for name in names)
-    if not any(needle in blob for needle in _needles(bundle, subject)):
+    if not any(needle in blob for needle in needles):
         return False
     if bundle == "subsidiary":
-        report_type = str(fact.get("report_type") or "")
-        report_nm = str(fact.get("report_nm") or "")
-        return report_type == "F002" or "연결" in report_nm
+        return classify_audit_document(str(fact.get("document_name") or "")) == "consolidated"
     return True
 
 
@@ -597,7 +618,7 @@ def _section_predicate(bundle: str, subject: str) -> str:
     parts = [f"e.section_name LIKE '%{needle}%'" for needle in needles]
     clause = "(" + " OR ".join(parts) + ")" if parts else "1 = 0"
     if bundle == "subsidiary":
-        clause += " AND (d.report_type = 'F002' OR IFNULL(d.report_nm, '') LIKE '%연결%')"
+        clause += f" AND {_AUDIT_CONSOLIDATED}"
     return clause
 
 
@@ -618,21 +639,22 @@ def _load_sample_facts(
         rows = conn.execute(
             """
             SELECT e.section_name AS section_name,
-                   d.report_type AS report_type,
-                   d.report_nm AS report_nm
+                   e.document_name AS document_name
             FROM cat.entries e
             JOIN cat.disclosures d ON d.rcept_no = e.rcept_no
             WHERE e.rcept_no = ? AND IFNULL(e.dcm_no, '') = IFNULL(?, '')
             """,
             (sample["rcept_no"], sample["dcm_no"]),
         ).fetchall()
+        sections = [row["section_name"] or "" for row in rows]
+        documents = [row["document_name"] or "" for row in rows]
         paired.append(
             (
                 sample,
                 {
-                    "_sections": [row["section_name"] or "" for row in rows],
-                    "report_type": rows[0]["report_type"] if rows else "",
-                    "report_nm": rows[0]["report_nm"] if rows else "",
+                    "_sections": sections,
+                    "_documents": documents,
+                    "document_name": documents[0] if documents else "",
                 },
             )
         )
@@ -721,12 +743,7 @@ def oversample(
             d.rcept_no AS rcept_no,
             e.dcm_no AS dcm_no,
             MAX(d.report_type) AS source_report_type,
-            CASE
-                WHEN MAX(d.report_type) = 'F002'
-                  OR IFNULL(MAX(d.report_nm), '') LIKE '%연결%'
-                THEN 'consolidated'
-                ELSE 'separate'
-            END AS fs_scope,
+            MAX(CASE WHEN {_AUDIT_CONSOLIDATED} THEN 1 ELSE 0 END) AS audit_consolidated,
             MAX(d.rcept_dt) AS rcept_dt,
             MAX(d.year_end) AS year_end,
             MAX(d.correction_type) AS correction_type,
@@ -739,6 +756,7 @@ def oversample(
         WHERE d.report_type IN ('F001', 'F002', 'A001')
           AND IFNULL(d.report_nm, '') NOT LIKE '%감사의감사보고서%'
           AND IFNULL(e.dcm_no, '') != ''
+          AND {_AUDIT_PREDICATE}
           AND {section_sql}
           AND NOT EXISTS (
               SELECT 1 FROM gold_samples s
@@ -793,10 +811,16 @@ def oversample(
         weight = (len(rows) / len(picked)) if picked else 0.0
         for record in picked:
             next_order += 1
+            scope = (
+                "consolidated"
+                if int(record["audit_consolidated"] or 0)
+                else "separate"
+            )
             meta = {
                 "oversample_for": f"{bundle}:{subject}",
                 "field_weight": weight,
                 "catalog_as_of": as_of,
+                "scope": scope,
                 "dtd": record["dtd"] or "",
                 "fye": record["year_end"] or "",
                 "layout_era": layout_era(record["year_end"]),

@@ -17,6 +17,7 @@ htmlcov/
 .env
 .cache/
 .superpowers/
+.worktrees/
 gold.db
 gold*.db
 
