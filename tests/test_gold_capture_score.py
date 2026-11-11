@@ -302,3 +302,28 @@ def test_capture_hours_reads_hours_cell_snapshots(tmp_path) -> None:
     outcomes = _outcomes(conn)
     assert outcomes[("HOK", "hours", "table")] == "tp"
     assert outcomes[("HBAD", "hours", "table")] == "fp"
+
+
+def test_capture_hours_headcount_only_mismatch_is_fp(tmp_path) -> None:
+    conn = _db(tmp_path)
+    _sample(conn, "HHEAD")
+    _snapshot(
+        conn,
+        "HHEAD",
+        {
+            "hours": {
+                "status": "found",
+                "value": {
+                    "cells": [
+                        _hours_cell("합계", "total", "감사시간", "audit_hours", 120.0),
+                        _hours_cell("합계", "total", "투입인원", "headcount", 7.0),
+                    ]
+                },
+            }
+        },
+    )
+    _capture(conn, "HHEAD", "hours", "total|audit_hours|current", "found", 120.0)
+    _capture(conn, "HHEAD", "hours", "total|headcount|current", "found", 6.0)
+    conn.commit()
+    score(conn, _VERSION, source="captures")
+    assert _outcomes(conn)[("HHEAD", "hours", "table")] == "fp"

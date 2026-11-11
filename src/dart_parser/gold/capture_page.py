@@ -44,10 +44,13 @@ def render_capture_page(
     period_total: int = 0,
     period: str = "",
     toc: Sequence[tuple[str, str]] = (),
+    base: str = "doc",
 ) -> str:
     """왼쪽은 공시 shadow root, 오른쪽은 입수 행이다."""
+    if base not in {"doc", "recapture"}:
+        raise ValueError("base는 doc 또는 recapture입니다.")
     title = _title(rcept_no, dcm_no, company, report, filed)
-    capture_url = _path(rcept_no, dcm_no, "capture")
+    capture_url = _path(rcept_no, dcm_no, "capture", base)
     cleaned = prepare_disclosure_html(filing_html)
     row_column = _rows(
         rows,
@@ -59,6 +62,12 @@ def render_capture_page(
         dcm_no,
         miss_bundle,
         miss_subject,
+        base,
+    )
+    progress = (
+        f'<p id="period-progress">재입수 완료 {period_done}/{period_total}</p>'
+        if base == "recapture"
+        else f'<p id="period-progress">완료 {period_done}/{period_total}</p>'
     )
     header = (
         "<header>"
@@ -69,10 +78,10 @@ def render_capture_page(
         f"<p>{html.escape(rcept_no)}</p>"
         f"<p>{html.escape(dcm_no)}</p>"
         f'<p id="doc-progress">기록 {recorded}/{row_total}</p>'
-        f'<p id="period-progress">완료 {period_done}/{period_total}</p>'
+        f"{progress}"
         f"{_warnings(encoding_uncertain, dcm_ambiguous, cache_missing)}"
-        f"{_complete_form(rcept_no, dcm_no, token)}"
-        f"{_next_link(period)}"
+        f"{_complete_form(rcept_no, dcm_no, token, base)}"
+        f"{_next_link(period, base)}"
         "</header>"
     )
     body = (
@@ -115,6 +124,7 @@ def _rows(
     dcm_no: str,
     miss_bundle: str,
     miss_subject: str,
+    base: str,
 ) -> str:
     parts: list[str] = []
     current = ""
@@ -128,7 +138,7 @@ def _rows(
             unit_group = _UNIT_GROUP.get(row.group)
             if unit_group is not None:
                 parts.append(
-                    _unit_form(rcept_no, dcm_no, token, unit_group, units.get(unit_group))
+                    _unit_form(rcept_no, dcm_no, token, unit_group, units.get(unit_group), base)
                 )
         missed = bool(miss_bundle) and row.bundle == miss_bundle and row.subject == miss_subject
         parts.append(
@@ -151,13 +161,14 @@ def _unit_form(
     token: str,
     unit_group: str,
     chosen: int | None,
+    base: str,
 ) -> str:
     blank = " selected" if chosen is None else ""
     options: list[str] = [f'<option value=""{blank}></option>']
     for scale, name in _SCALES:
         selected = " selected" if chosen == scale else ""
         options.append(f'<option value="{scale}"{selected}>{html.escape(name)}</option>')
-    action = html.escape(_path(rcept_no, dcm_no, "unit"), quote=True)
+    action = html.escape(_path(rcept_no, dcm_no, "unit", base), quote=True)
     return (
         f'<form method="post" action="{action}">'
         f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
@@ -320,8 +331,8 @@ def _warnings(encoding_uncertain: bool, dcm_ambiguous: bool, cache_missing: bool
     return "".join(parts)
 
 
-def _complete_form(rcept_no: str, dcm_no: str, token: str) -> str:
-    action = html.escape(_path(rcept_no, dcm_no, "complete"), quote=True)
+def _complete_form(rcept_no: str, dcm_no: str, token: str, base: str) -> str:
+    action = html.escape(_path(rcept_no, dcm_no, "complete", base), quote=True)
     return (
         f'<form method="post" action="{action}">'
         f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
@@ -330,10 +341,11 @@ def _complete_form(rcept_no: str, dcm_no: str, token: str) -> str:
     )
 
 
-def _next_link(period: str) -> str:
+def _next_link(period: str, base: str) -> str:
     if not period:
         return ""
-    return f'<p><a href="/next?period={quote(period)}">다음 문서</a></p>'
+    href = "/next" if base == "doc" else f"/{base}/next"
+    return f'<p><a href="{href}?period={quote(period)}">다음 문서</a></p>'
 
 
 def _toc_nav(toc: Sequence[tuple[str, str]]) -> str:
@@ -361,8 +373,8 @@ def html_json(value: Any) -> str:
     )
 
 
-def _path(rcept_no: str, dcm_no: str, action: str) -> str:
-    return f"/doc/{quote(rcept_no)}/{quote(dcm_no)}/{action}"
+def _path(rcept_no: str, dcm_no: str, action: str, base: str = "doc") -> str:
+    return f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}/{action}"
 
 
 def _data(capture_url: str, filing_html: str) -> str:

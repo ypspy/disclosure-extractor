@@ -149,4 +149,70 @@ CREATE TABLE gold_capture_history (
     superseded_at TEXT NOT NULL
 );
 """,
+    """
+CREATE TABLE gold_recaptures (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    value TEXT,
+    evidence TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (rcept_no, dcm_no, bundle, subject)
+);
+
+CREATE TABLE gold_recapture_units (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    unit_group VARCHAR(8) NOT NULL,
+    unit_scale INTEGER NOT NULL,
+    PRIMARY KEY (rcept_no, dcm_no, unit_group)
+);
+
+CREATE TABLE gold_recapture_history (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    value TEXT,
+    evidence TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    action TEXT NOT NULL,
+    superseded_at TEXT NOT NULL
+);
+
+CREATE TABLE gold_recapture_status (
+    run_id TEXT NOT NULL,
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL CHECK (status IN ('in_progress', 'done')),
+    started_at TEXT,
+    finished_at TEXT,
+    PRIMARY KEY (run_id, rcept_no, dcm_no)
+);
+
+CREATE TABLE gold_adjudications (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    chosen_pass INTEGER NOT NULL CHECK (chosen_pass IN (1, 2)),
+    note TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (rcept_no, dcm_no, bundle, subject)
+);
+
+CREATE TABLE gold_adjudication_history (
+    rcept_no VARCHAR(32) NOT NULL,
+    dcm_no VARCHAR(32) NOT NULL,
+    bundle VARCHAR(32) NOT NULL,
+    subject VARCHAR(64) NOT NULL,
+    chosen_pass INTEGER NOT NULL CHECK (chosen_pass IN (1, 2)),
+    note TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    superseded_at TEXT NOT NULL
+);
+""",
 )
