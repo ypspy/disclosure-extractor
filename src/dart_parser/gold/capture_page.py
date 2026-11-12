@@ -116,6 +116,7 @@ def render_capture_page(
         "overflow:auto}"
         "#field-picker[hidden]{display:none}"
         "#field-picker button{display:block;width:100%;text-align:left;margin:0.15rem 0}"
+        "select.gold-unit-needed{outline:2px solid var(--mark)}"
         "</style></head><body>"
         f"{header}"
         f"{_sections_nav()}"

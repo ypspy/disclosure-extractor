@@ -640,11 +640,14 @@ def _post_preview(
     proposal = parse_click(
         bundle, subject, text, unit_scale=scale, icfr_engagement=engagement
     )
+    blocked = control.blocked
+    if group is not None and scale is None and not blocked:
+        blocked = "단위를 먼저 선택하세요"
     payload = {
         "proposal": proposal,
         "kind": control.kind,
         "options": [{"value": value, "label": label} for value, label in control.options],
-        "blocked": control.blocked,
+        "blocked": blocked,
     }
     return _json(start_response, "200 OK", payload)
 

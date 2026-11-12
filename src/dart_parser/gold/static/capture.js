@@ -17,6 +17,7 @@
   var armedPointer = false;
   var pickerOpenedAt = 0;
   var hoverEl = null;
+  var lastLocatorKey = "";
   var autoKey = "gold-auto-advance";
   var storedAuto = sessionStorage.getItem(autoKey);
   var autoOn = storedAuto === null ? true : storedAuto === "1";
@@ -171,6 +172,11 @@
 
   document.getElementById("confirm-save").addEventListener("click", function () {
     if (!pending) return;
+    if (amountNeedsUnit(pending.payload)) {
+      showReason("단위를 먼저 선택하세요");
+      pointAtUnit(pending.form);
+      return;
+    }
     var value = readConfirmed(pending.payload);
     if (value === undefined) {
       showReason("값을 고르세요.");
@@ -266,8 +272,7 @@
     if (event.key === "Escape") hidePicker();
     var undo = (event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z");
     if (!undo || event.shiftKey) return;
-    var tag = event.target && event.target.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (editingText(event.target)) return;
     event.preventDefault();
     undoLast();
   });
@@ -362,12 +367,51 @@
     var slot = document.getElementById("confirm-control");
     slot.replaceChildren();
     showReason(payload.blocked || "");
+    var saveButton = document.getElementById("confirm-save");
+    if (amountNeedsUnit(payload)) {
+      if (saveButton) saveButton.disabled = true;
+      pointAtUnit(pending && pending.form);
+      bar.hidden = false;
+      return;
+    }
+    if (saveButton) saveButton.disabled = false;
     if (payload.blocked) {
       bar.hidden = false;
       return;
     }
     slot.appendChild(controlFor(payload));
     bar.hidden = false;
+  }
+  function amountNeedsUnit(payload) {
+    return !!(
+      payload
+      && payload.kind === "amount"
+      && payload.blocked === "단위를 먼저 선택하세요"
+    );
+  }
+  function pointAtUnit(form) {
+    var marked = document.querySelectorAll("select.gold-unit-needed");
+    for (var i = 0; i < marked.length; i++) {
+      marked[i].classList.remove("gold-unit-needed");
+    }
+    var section = form && form.closest ? form.closest("section[data-section]") : null;
+    var select = section ? section.querySelector('select[name="unit_scale"]') : null;
+    if (!select) return;
+    select.classList.add("gold-unit-needed");
+    if (select.scrollIntoView) select.scrollIntoView({block: "center"});
+    if (select.focus) select.focus();
+  }
+  function editingText(target) {
+    if (!target) return false;
+    if (target.isContentEditable) return true;
+    var tag = target.tagName;
+    if (tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (tag !== "INPUT") return false;
+    var type = String(target.type || "text").toLowerCase();
+    return type === "text" || type === "search" || type === "number"
+      || type === "password" || type === "email" || type === "url" || type === "tel"
+      || type === "date" || type === "time" || type === "datetime-local"
+      || type === "month" || type === "week";
   }
   function controlFor(payload) {
     if (payload.kind === "enum") {
@@ -412,6 +456,7 @@
   }
   function readConfirmed(payload) {
     var slot = document.getElementById("confirm-control");
+    if (amountNeedsUnit(payload)) return undefined;
     if (payload.blocked) return undefined;
     if (payload.kind === "enum") {
       var chosen = slot.querySelector("select").value;
@@ -656,6 +701,10 @@
     previewToken += 1;
     pending = null;
     bar.hidden = true;
+    var saveButton = document.getElementById("confirm-save");
+    if (saveButton) saveButton.disabled = false;
+    var marked = document.querySelectorAll("select.gold-unit-needed");
+    for (var i = 0; i < marked.length; i++) marked[i].classList.remove("gold-unit-needed");
   }
   function normalizeText(text) {
     if (!text) return "";
@@ -746,6 +795,7 @@
       parts.unshift(node.tagName.toLowerCase() + "[" + index + "]");
       node = node.parentElement;
     }
+    if (parts.length && parts[0].charAt(0) === "/") return parts.join("/");
     return "/" + parts.join("/");
   }
   function queryFiling(selector) {
@@ -776,7 +826,10 @@
     return el;
   }
   function scrollToLocator(form) {
-    var saved = locatorMap[fieldKey(form)];
+    var key = fieldKey(form);
+    if (key === lastLocatorKey) return;
+    lastLocatorKey = key;
+    var saved = locatorMap[key];
     if (!saved || !saved.locator || !saved.locator.css_selector) return;
     var el = queryFiling(saved.locator.css_selector);
     if (!el || !el.scrollIntoView) return;

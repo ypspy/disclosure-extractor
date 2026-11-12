@@ -136,6 +136,24 @@ def _post(
     return str(captured["status"]), dict(captured["headers"]), body
 
 
+def _gold_tables(tmp_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    names = (
+        "gold_captures",
+        "gold_capture_units",
+        "gold_capture_history",
+        "gold_recaptures",
+        "gold_recapture_units",
+        "gold_recapture_history",
+    )
+    snapshot = {
+        name: conn.execute(f"SELECT * FROM {name}").fetchall()
+        for name in names
+    }
+    conn.close()
+    return snapshot
+
+
 def _capture(tmp_path: Path, bundle: str, subject: str) -> sqlite3.Row | None:
     conn = sqlite3.connect(tmp_path / "gold.db")
     conn.row_factory = sqlite3.Row
@@ -1215,4 +1233,196 @@ def test_portless_loopback_host_requires_server_port_80(tmp_path: Path) -> None:
     bare_local, _headers, bare_body = _request_host(app, "/doc/R100/D100/export", "localhost", "")
     assert bare_local.startswith("403")
     assert saved.encode() not in bare_body
+    app.close()
+
+
+def test_xpath_of_does_not_prefix_an_absolute_id_step(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    xpath = _js_function(body.decode(), "xpathOf")
+    assert '//*[@id="' in xpath
+    guard = re.search(
+        r'if\s*\(\s*parts\.length\s*&&\s*parts\[0\]\.charAt\(0\)\s*===\s*"/"\s*\)\s*'
+        r'return\s+parts\.join\("/"\);',
+        xpath,
+    )
+    assert guard is not None
+    prefix = xpath.find('return "/" + parts.join("/")')
+    assert prefix == -1 or guard.start() < prefix
+    app.close()
+
+
+_TEXT_INPUT_TYPES = (
+    "text",
+    "search",
+    "number",
+    "password",
+    "email",
+    "url",
+    "tel",
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week",
+)
+
+
+def test_undo_ignores_text_fields_and_still_runs_on_radios(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    handler = script.split('addEventListener("keydown"', 1)[1].split(
+        'addEventListener("submit"', 1
+    )[0]
+    assert "shiftKey" in handler
+    assert "editingText(" in handler
+    assert handler.index("editingText(") < handler.index("undoLast()")
+    editing = _js_function(script, "editingText")
+    for kind in _TEXT_INPUT_TYPES:
+        assert f'"{kind}"' in editing
+    assert "TEXTAREA" in editing
+    assert "SELECT" in editing
+    assert "isContentEditable" in editing
+    assert '|| "text"' in editing
+    for kind in ("radio", "checkbox", "button", "submit"):
+        assert f'"{kind}"' not in editing
+    early = handler.split("undoLast()", 1)[0]
+    assert 'tag === "INPUT"' not in early
+    for kind in ("radio", "checkbox", "button", "submit"):
+        assert f'"{kind}"' not in early
+    app.close()
+
+
+def test_preview_amount_without_a_unit_explains_and_does_not_write(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    before = _gold_tables(tmp_path)
+    status, headers, body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "total_asset@current", "text": "19,506"},
+    )
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    payload = json.loads(body)
+    assert payload["proposal"] is None
+    assert payload["kind"] == "amount"
+    assert payload["blocked"] == "단위를 먼저 선택하세요"
+    income, _headers, income_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "revenue@current", "text": "19,506"},
+    )
+    assert income.startswith("200")
+    income_payload = json.loads(income_body)
+    assert income_payload["proposal"] is None
+    assert income_payload["blocked"] == "단위를 먼저 선택하세요"
+    plain, _headers, plain_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "company_name", "subject": "value", "text": "가나회사"},
+    )
+    assert plain.startswith("200")
+    plain_payload = json.loads(plain_body)
+    assert plain_payload["proposal"] == "가나회사"
+    assert "단위를 먼저" not in plain_payload["blocked"]
+    assert _gold_tables(tmp_path) == before
+    _post(app, "/doc/R100/D100/unit", {"unit_group": "bs", "unit_scale": "1"})
+    ready, _headers, ready_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "total_asset@current", "text": "19,506"},
+    )
+    assert ready.startswith("200")
+    ready_payload = json.loads(ready_body)
+    assert ready_payload["proposal"]["value"] == 19506
+    assert ready_payload["proposal"]["unit_scale"] == 1
+    assert "단위를 먼저" not in ready_payload["blocked"]
+    app.close()
+
+
+def test_confirm_bar_points_at_the_unit_chooser_and_skips_post(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    assert "단위를 먼저 선택하세요" in script
+    needs = _js_function(script, "amountNeedsUnit")
+    assert 'kind === "amount"' in needs
+    assert "단위를 먼저 선택하세요" in needs
+    bar = _js_function(script, "renderBar")
+    assert "showReason" in bar
+    assert "amountNeedsUnit" in bar
+    assert "pointAtUnit" in bar
+    assert bar.index("amountNeedsUnit") < bar.index("controlFor")
+    held = bar.split("amountNeedsUnit", 1)[1].split("controlFor", 1)[0]
+    assert "return" in held
+    point = _js_function(script, "pointAtUnit")
+    assert 'select[name="unit_scale"]' in point
+    assert "scrollIntoView" in point
+    assert ".focus" in point
+    save = script.split('getElementById("confirm-save")', 1)[1].split(
+        'getElementById("confirm-cancel")', 1
+    )[0]
+    assert "amountNeedsUnit" in save
+    assert save.index("amountNeedsUnit") < save.index("postCapture")
+    read = _js_function(script, "readConfirmed")
+    assert "amountNeedsUnit" in read
+    assert read.index("amountNeedsUnit") < read.index('querySelector("input")')
+    app.close()
+
+
+def test_scroll_to_locator_waits_for_a_different_field(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    row_over = script.split('document.addEventListener("pointerover"', 1)[1].split(
+        'document.addEventListener("focusin"', 1
+    )[0]
+    focus = script.split('document.addEventListener("focusin"', 1)[1].split(
+        'document.addEventListener("keydown"', 1
+    )[0]
+    assert "scrollToLocator" in row_over
+    assert "scrollToLocator" in focus
+    scroll = _js_function(script, "scrollToLocator")
+    assert "lastLocatorKey" in scroll
+    assert "fieldKey" in scroll
+    assert re.search(r"if\s*\(\s*key\s*===\s*lastLocatorKey\s*\)\s*return", scroll)
+    assert scroll.index("lastLocatorKey") < scroll.index("scrollIntoView")
+    app.close()
+
+
+def test_list_undo_replays_clear_and_middle_delete_for_both_fields(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    fields = _js_function(script, "isListField")
+    assert "notes_toc" in fields and '"value"' in fields
+    assert "communications" in fields and '"items"' in fields
+    undo = _js_function(script, "undoLast")
+    assert "undoStack.pop()" not in undo
+    assert undo.index("if (!ok)") < undo.index("commitUndo()")
+    restore = _js_function(script, "restoreList")
+    assert "undoStack.pop()" not in restore
+    assert "current.length === previous.length + 1" in restore
+    assert restore.index("postRemove") < restore.index("replayList")
+    append = restore.split("replayList", 1)[0]
+    assert "return" in append
+    replay = _js_function(script, "replayList")
+    assert "!current.length" in replay
+    assert "replayLines" in replay
+    assert 'postStatus(form, "clear"' in replay
+    empty = replay.split("!current.length", 1)[1].split('postStatus(form, "clear"', 1)[0]
+    assert "replayLines" in empty
+    clear_branch = replay.split('postStatus(form, "clear"', 1)[1]
+    assert "if (!ok)" in clear_branch
+    assert clear_branch.index("if (!ok)") < clear_branch.index("replayLines")
+    lines = _js_function(script, "replayLines")
+    assert "postCapture" in lines
+    assert "done(false" in lines
+    assert "commitUndo" not in lines
     app.close()
