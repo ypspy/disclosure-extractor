@@ -181,6 +181,7 @@ def test_click_saves_when_a_row_and_unit_are_chosen(tmp_path: Path) -> None:
             "bundle": "accounts",
             "subject": "total_asset@current",
             "text": "19,506",
+            "confirmed": json.dumps(19506),
         },
     )
     assert status.startswith("303")
@@ -189,7 +190,12 @@ def test_click_saves_when_a_row_and_unit_are_chosen(tmp_path: Path) -> None:
     missed, headers, _body = _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "accounts", "subject": "current_asset@current", "text": "없음"},
+        {
+            "bundle": "accounts",
+            "subject": "current_asset@current",
+            "text": "없음",
+            "confirmed": json.dumps("없음"),
+        },
     )
     assert missed.startswith("303")
     assert "miss_subject=current_asset%40current" in headers["Location"]
@@ -239,7 +245,12 @@ def test_absent_clear_and_rejected_requests(tmp_path: Path) -> None:
     host, _headers, host_body = _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나다"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나다",
+            "confirmed": json.dumps("가나다"),
+        },
         host="evil.test:80",
     )
     assert host.startswith("403")
@@ -293,7 +304,12 @@ def test_pages_do_not_download_sample_or_capture(
     post_status, _headers, _body = _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     assert list_status == "200 OK"
     assert doc_status == "200 OK"
@@ -340,7 +356,12 @@ def test_encoding_and_ambiguous_document_warnings(tmp_path: Path) -> None:
     status, _headers, _body = _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     assert status.startswith("409")
     unit, _headers, _body = _post(
@@ -453,7 +474,12 @@ def test_first_capture_marks_the_sample_in_progress(tmp_path: Path) -> None:
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     conn = sqlite3.connect(tmp_path / "gold.db")
     status, started = conn.execute(
@@ -464,7 +490,12 @@ def test_first_capture_marks_the_sample_in_progress(tmp_path: Path) -> None:
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "다라"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "다라",
+            "confirmed": json.dumps("다라"),
+        },
     )
     again = conn.execute(
         "SELECT started_at FROM gold_samples WHERE dcm_no = 'D100'"
@@ -524,22 +555,42 @@ def test_each_saved_line_has_a_remove_button(tmp_path: Path) -> None:
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "notes_toc", "subject": "value", "text": "일반사항"},
+        {
+            "bundle": "notes_toc",
+            "subject": "value",
+            "text": "일반사항",
+            "confirmed": json.dumps("일반사항"),
+        },
     )
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "notes_toc", "subject": "value", "text": "재고자산"},
+        {
+            "bundle": "notes_toc",
+            "subject": "value",
+            "text": "재고자산",
+            "confirmed": json.dumps("재고자산"),
+        },
     )
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "communications", "subject": "items", "text": "2017년 3월 2일 회의"},
+        {
+            "bundle": "communications",
+            "subject": "items",
+            "text": "2017년 3월 2일 회의",
+            "confirmed": json.dumps({"raw": "2017년 3월 2일 회의", "date": "2017-03-02"}),
+        },
     )
     _post(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "communications", "subject": "items", "text": "둘째 회의"},
+        {
+            "bundle": "communications",
+            "subject": "items",
+            "text": "둘째 회의",
+            "confirmed": json.dumps({"raw": "둘째 회의"}),
+        },
     )
     _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
     page = body.decode()
@@ -692,7 +743,12 @@ def test_post_checks_ambiguity_without_loading_the_filing(
     saved, _headers, _body = _submit(
         app,
         "/doc/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     assert saved.startswith("303")
     unit, _headers, _body = _submit(
@@ -745,4 +801,37 @@ def test_going_concern_rule_is_on_the_row(tmp_path: Path) -> None:
     assert "의견 근거만 있거나, 전기 인용만 있거나, 청산기준 강조만 있으면 0입니다." in page
     assert 'id="doc-progress">기록 0/' in page
     assert 'id="period-progress">완료 0/1' in page
+    app.close()
+
+
+def test_preview_proposes_a_value_without_writing(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    before = _request(app, "GET", "/doc/R100/D100")
+    status, headers, body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "opinion", "subject": "value", "text": "한정의견을 표명합니다"},
+    )
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    payload = json.loads(body)
+    assert payload["proposal"] == "한정"
+    assert payload["kind"] == "enum"
+    assert payload["blocked"] == ""
+    assert ("한정",) in [(item["value"],) for item in payload["options"]]
+    after = _request(app, "GET", "/doc/R100/D100")
+    assert before[2] == after[2]
+    app.close()
+
+
+def test_capture_without_confirmed_does_not_write(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, headers, _body = _post(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "company_name", "subject": "value", "text": "가나"},
+    )
+    assert status.startswith("303")
+    assert "miss_subject=value" in headers["Location"]
+    assert _capture(tmp_path, "company_name", "value") is None
     app.close()

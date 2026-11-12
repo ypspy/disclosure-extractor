@@ -105,6 +105,7 @@ def test_ineligible_document_rejects_recapture_get_and_post(tmp_path: Path) -> N
             "bundle": "company_name",
             "subject": "value",
             "text": "가나",
+            "confirmed": json.dumps("가나"),
         },
     )
     assert posted.startswith("409")
@@ -181,7 +182,12 @@ def test_second_pass_write_does_not_touch_the_first_pass(tmp_path: Path) -> None
     status, headers, _body = _post(
         app,
         "/recapture/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "2차회사"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "2차회사",
+            "confirmed": json.dumps("2차회사"),
+        },
     )
     assert status.startswith("303")
     assert headers["Location"] == "/recapture/R100/D100"
@@ -329,7 +335,12 @@ def test_recapture_post_requires_token_origin_and_a_clear_document(tmp_path: Pat
     missing, _headers, missing_body = _raw_post(
         app,
         "/recapture/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     assert missing.startswith("403")
     assert app.token not in missing_body.decode()
@@ -341,6 +352,7 @@ def test_recapture_post_requires_token_origin_and_a_clear_document(tmp_path: Pat
             "bundle": "company_name",
             "subject": "value",
             "text": "가나",
+            "confirmed": json.dumps("가나"),
         },
         origin="http://evil.test",
     )
@@ -353,6 +365,7 @@ def test_recapture_post_requires_token_origin_and_a_clear_document(tmp_path: Pat
             "bundle": "company_name",
             "subject": "value",
             "text": "가나",
+            "confirmed": json.dumps("가나"),
         },
     )
     assert conflict.startswith("409")
@@ -534,6 +547,7 @@ def test_first_pass_posts_stay_409_while_recapture_is_in_progress(tmp_path: Path
                 "bundle": "company_name",
                 "subject": "value",
                 "text": "다른회사",
+                "confirmed": json.dumps("다른회사"),
             },
         ),
         (
@@ -615,7 +629,12 @@ def test_finished_recapture_unlocks_doc_and_locks_second_pass_writes(tmp_path: P
     writes = (
         (
             "/recapture/R100/D100/capture",
-            {"bundle": "company_name", "subject": "value", "text": "바꾼회사"},
+            {
+                "bundle": "company_name",
+                "subject": "value",
+                "text": "바꾼회사",
+                "confirmed": json.dumps("바꾼회사"),
+            },
         ),
         (
             "/recapture/R100/D100/unit",
@@ -698,7 +717,12 @@ def test_recapture_routes_do_not_download_sample_or_capture(
     posted, _headers, _body = _post(
         app,
         "/recapture/R100/D100/capture",
-        {"bundle": "company_name", "subject": "value", "text": "가나"},
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나",
+            "confirmed": json.dumps("가나"),
+        },
     )
     report, _headers, _body = _request(app, "GET", "/recapture/report", "run=run")
     assert listed.startswith("303")

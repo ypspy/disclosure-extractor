@@ -23,7 +23,13 @@ from urllib.parse import parse_qs, quote
 from wsgiref.simple_server import make_server
 
 from dart_parser.gold.cache import CACHE_ROOT, cache_dir, load_section_html
-from dart_parser.gold.capture import capture_rows, known_subject
+from dart_parser.gold.capture import (
+    capture_rows,
+    field_control,
+    known_subject,
+    money_group,
+    parse_click,
+)
 from dart_parser.gold.capture_html import (
     heading_toc,
     prepare_disclosure_html,
@@ -270,7 +276,7 @@ class ReviewApplication:
         if (
             len(parts) == 4
             and parts[0] == "doc"
-            and parts[3] in {"capture", "unit", "complete"}
+            and parts[3] in {"capture", "unit", "complete", "preview"}
             and _safe_id(parts[1])
             and _safe_id(parts[2])
         ):
@@ -285,6 +291,8 @@ class ReviewApplication:
                 return _post_capture(self, environ, start_response, parts[1], parts[2])
             if parts[3] == "complete":
                 return _post_complete(self, environ, start_response, parts[1], parts[2])
+            if parts[3] == "preview":
+                return _post_preview(self, environ, start_response, parts[1], parts[2])
             return _post_unit(self, environ, start_response, parts[1], parts[2])
         if method != "GET":
             return _html(
@@ -437,6 +445,28 @@ def _reject(start_response: Any) -> list[bytes]:
     return _html(start_response, "403 Forbidden", "요청을 거절했습니다.")
 
 
+def _json(start_response: Any, status: str, payload: Any) -> list[bytes]:
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    start_response(
+        status,
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+            ("X-Content-Type-Options", "nosniff"),
+        ],
+    )
+    return [body]
+
+
+def _confirmed(raw: str) -> Any:
+    if raw == "":
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def _host_allowed(environ: dict[str, Any]) -> bool:
     host = str(environ.get("HTTP_HOST") or "")
     port = str(environ.get("SERVER_PORT") or "")
@@ -543,6 +573,58 @@ def _filing_meta(store: ReviewStore, rcept_no: str) -> tuple[str, str, str]:
     return str(row["company"] or ""), str(row["report"] or ""), str(row["filed"] or "")
 
 
+def _post_preview(
+    app: ReviewApplication,
+    environ: dict[str, Any],
+    start_response: Any,
+    rcept_no: str,
+    dcm_no: str,
+    *,
+    capture_pass: int = 1,
+) -> list[bytes]:
+    if not _host_allowed(environ) or not _origin_allowed(environ):
+        return _reject(start_response)
+    form = _form_body(environ)
+    if not _token_ok(app.token, _one(form, "token")):
+        return _reject(start_response)
+    if app.store.sample(rcept_no, dcm_no) is None:
+        return _json(start_response, "404 Not Found", {"error": "문서가 없습니다."})
+    blocked = _ambiguous(app, rcept_no, dcm_no, start_response)
+    if blocked is not None:
+        return blocked
+    if capture_pass == 1 and recapture_in_progress(app.store.conn, rcept_no, dcm_no):
+        return _json(start_response, "409 Conflict", {"error": "재입수 중"})
+    if capture_pass == 2 and recapture_done(app.store.conn, rcept_no, dcm_no):
+        return _json(start_response, "409 Conflict", {"error": "재입수가 끝났습니다"})
+    bundle = _one(form, "bundle")
+    subject = _one(form, "subject")
+    if not known_subject(bundle, subject):
+        return _json(start_response, "400 Bad Request", {"error": "항목이 아닙니다."})
+    text = _one(form, "text")
+    scale = None
+    group = money_group(bundle, subject)
+    if group is not None:
+        scale = load_units(
+            app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass
+        ).get(group)
+    engagement = None
+    if bundle == "icfr":
+        from dart_parser.gold.capture_store import _engagement
+
+        engagement = _engagement(app.store.conn, rcept_no, dcm_no, capture_pass)
+    control = field_control(bundle, subject, icfr_engagement=engagement)
+    proposal = parse_click(
+        bundle, subject, text, unit_scale=scale, icfr_engagement=engagement
+    )
+    payload = {
+        "proposal": proposal,
+        "kind": control.kind,
+        "options": [{"value": value, "label": label} for value, label in control.options],
+        "blocked": control.blocked,
+    }
+    return _json(start_response, "200 OK", payload)
+
+
 def _post_capture(
     app: ReviewApplication,
     environ: dict[str, Any],
@@ -598,7 +680,14 @@ def _post_capture(
         clear_capture(conn, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass)
         return _see_other(start_response, rcept_no, dcm_no, base)
     if not save_capture(
-        conn, rcept_no, dcm_no, bundle, subject, _one(form, "text"), capture_pass=capture_pass
+        conn,
+        rcept_no,
+        dcm_no,
+        bundle,
+        subject,
+        _one(form, "text"),
+        confirmed=_confirmed(_one(form, "confirmed")),
+        capture_pass=capture_pass,
     ):
         location = (
             f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}"
@@ -791,7 +880,7 @@ def _recapture(
         return _post_adjudicate(app, environ, start_response)
     if (
         len(parts) == 3
-        and parts[2] in {"capture", "unit", "complete"}
+        and parts[2] in {"capture", "unit", "complete", "preview"}
         and _safe_id(parts[0])
         and _safe_id(parts[1])
     ):
@@ -811,6 +900,15 @@ def _recapture(
                 parts[1],
                 capture_pass=2,
                 base="recapture",
+            )
+        if parts[2] == "preview":
+            return _post_preview(
+                app,
+                environ,
+                start_response,
+                parts[0],
+                parts[1],
+                capture_pass=2,
             )
         if parts[2] == "complete":
             return _post_complete(
