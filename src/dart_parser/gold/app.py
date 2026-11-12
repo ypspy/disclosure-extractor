@@ -47,7 +47,7 @@ from dart_parser.gold.capture_store import (
     set_capture_status,
     set_unit,
 )
-from dart_parser.gold.db import migrate, open_gold
+from dart_parser.gold.db import migrate, open_catalog_readonly, open_gold
 from dart_parser.gold.recapture import (
     can_open_recapture,
     consistency_report,
@@ -105,11 +105,12 @@ class SourceDocument:
 
 
 class ReviewStore:
-    """gold.db 읽기·쓰기와 캐시 파일 읽기. 카탈로그는 읽기 전용이다."""
+    """gold.db 읽기·쓰기와 캐시 파일 읽기. 카탈로그는 요청마다 읽기 전용으로 연다."""
 
     def __init__(self, catalog: Path, gold: Path, cache: Path) -> None:
         self.cache_root = Path(cache)
-        self.conn = open_gold(Path(gold), Path(catalog))
+        self.catalog_path = Path(catalog)
+        self.conn = open_gold(Path(gold), None)
         migrate(self.conn)
 
     def close(self) -> None:
@@ -578,23 +579,27 @@ def _capture_document(
 def _filing_meta(store: ReviewStore, rcept_no: str) -> tuple[str, str, str]:
     """회사명, 보고서명, 제출일. 카탈로그를 못 읽으면 빈 문자열이다."""
     try:
-        row = store.conn.execute(
-            """
-            SELECT
-                COALESCE(c.corp_name, d.corp_name, '') AS company,
-                COALESCE(d.report_nm, '') AS report,
-                COALESCE(d.rcept_dt, '') AS filed
-            FROM cat.disclosures d
-            LEFT JOIN cat.corps c ON c.corp_code = d.corp_code
-            WHERE d.rcept_no = ?
-            """,
-            (rcept_no,),
-        ).fetchone()
+        with open_catalog_readonly(store.catalog_path) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(c.corp_name, d.corp_name, '') AS company,
+                    COALESCE(d.report_nm, '') AS report,
+                    COALESCE(d.rcept_dt, '') AS filed
+                FROM disclosures d
+                LEFT JOIN corps c ON c.corp_code = d.corp_code
+                WHERE d.rcept_no = ?
+                """,
+                (rcept_no,),
+            ).fetchone()
+            if row is None:
+                return "", "", ""
+            company = str(row["company"] or "")
+            report = str(row["report"] or "")
+            filed = str(row["filed"] or "")
     except sqlite3.Error:
         return "", "", ""
-    if row is None:
-        return "", "", ""
-    return str(row["company"] or ""), str(row["report"] or ""), str(row["filed"] or "")
+    return company, report, filed
 
 
 def _post_preview(

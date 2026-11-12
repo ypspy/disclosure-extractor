@@ -13,6 +13,7 @@ import pytest
 from dart_parser.gold.app import (
     LOOPBACK,
     ReviewApplication,
+    _filing_meta,
     bind_host,
     make_loopback_server,
     parse_args,
@@ -119,13 +120,104 @@ def test_server_socket_is_loopback(tmp_path: Path) -> None:
         server.server_close()
 
 
-def test_catalog_attached_read_only(tmp_path: Path) -> None:
+def _catalog_names(conn: sqlite3.Connection) -> set[str]:
+    return {str(row[1]) for row in conn.execute("PRAGMA database_list")}
+
+
+def _catalog_is_open(catalog: Path) -> bool:
+    """이 프로세스가 카탈로그 파일을 아직 열고 있으면 True."""
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        return False
+    target = catalog.resolve()
+    for entry in fd_dir.iterdir():
+        try:
+            linked = entry.readlink()
+        except OSError:
+            continue
+        if linked == target:
+            return True
+    return False
+
+
+def _insert_filing(catalog: Path, rcept_no: str) -> None:
+    conn = sqlite3.connect(catalog)
+    try:
+        conn.execute(
+            """
+            INSERT INTO disclosures (rcept_no, corp_code, report_nm, rcept_dt)
+            VALUES (?, 'C0001', '감사보고서', '20240315')
+            """,
+            (rcept_no,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_app_reads_catalog_meta_without_attaching_it(tmp_path: Path) -> None:
+    catalog, gold_path, cache = _seed(tmp_path)
+    _insert_filing(catalog, "R100")
+    app = ReviewApplication(catalog, gold_path, cache)
+    try:
+        assert "cat" not in _catalog_names(app.store.conn)
+        status, _headers, body = _request(app, "/doc/R100/D100")
+        page = body.decode()
+        assert status == "200 OK"
+        assert "표본" in page
+        assert "감사보고서" in page
+        assert "20240315" in page
+        company, report, filed = _filing_meta(app.store, "R100")
+        assert (company, report, filed) == ("표본", "감사보고서", "20240315")
+        assert "cat" not in _catalog_names(app.store.conn)
+        assert not _catalog_is_open(catalog)
+    finally:
+        app.close()
+
+
+def test_catalog_write_succeeds_while_the_app_is_open(tmp_path: Path) -> None:
+    catalog, gold_path, cache = _seed(tmp_path)
+    _insert_filing(catalog, "R100")
+    app = ReviewApplication(catalog, gold_path, cache)
+    try:
+        status, _headers, body = _request(app, "/doc/R100/D100")
+        assert status == "200 OK"
+        assert "표본" in body.decode()
+        assert "cat" not in _catalog_names(app.store.conn)
+        assert not _catalog_is_open(catalog)
+        writer = sqlite3.connect(catalog, timeout=1.0)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute(
+                "INSERT INTO disclosures (rcept_no, corp_code) VALUES ('write-ok', 'C0001')"
+            )
+            writer.execute("COMMIT")
+            found = writer.execute(
+                "SELECT rcept_no FROM disclosures WHERE rcept_no = 'write-ok'"
+            ).fetchone()
+        finally:
+            writer.close()
+        assert found is not None
+        assert not _catalog_is_open(catalog)
+    finally:
+        app.close()
+
+
+def test_catalog_connection_closes_after_the_request(tmp_path: Path) -> None:
     catalog, gold_path, cache = _seed(tmp_path)
     app = ReviewApplication(catalog, gold_path, cache)
-    assert app.store.conn.execute("SELECT count(*) FROM cat.disclosures").fetchone()[0] > 0
-    with pytest.raises(sqlite3.OperationalError):
-        app.store.conn.execute("DELETE FROM cat.disclosures")
-    app.close()
+    try:
+        company, _report, filed = _filing_meta(app.store, "20240101000001")
+        assert (company, filed) == ("표본", "20240315")
+        assert "cat" not in _catalog_names(app.store.conn)
+        assert not _catalog_is_open(catalog)
+        app.store.catalog_path = tmp_path / "missing-catalog.db"
+        assert _filing_meta(app.store, "20240101000001") == ("", "", "")
+        assert not _catalog_is_open(app.store.catalog_path)
+    finally:
+        app.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        app.store.conn.execute("SELECT 1")
 
 
 def test_empty_list_explains_that_sampling_does_not_run(tmp_path: Path) -> None:
