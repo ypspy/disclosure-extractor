@@ -883,4 +883,8 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     assert "켜진 칸이 없다" in script
     assert "드래그 글자가 비어 있다" in script
     assert "response.text()" in script.split("confirm-save", 1)[1]
+    preview = script.split("confirm-save", 1)[0]
+    before_pending = preview.split("response.text()", 1)[1].split("pending =", 1)[0]
+    assert "requestToken !== previewToken" in before_pending
+    assert before_pending.index("requestToken !== previewToken") < before_pending.index("return")
     app.close()

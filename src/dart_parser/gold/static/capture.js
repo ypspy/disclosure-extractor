@@ -7,6 +7,7 @@
   var root = host.attachShadow({mode: "open"});
   root.innerHTML = "<style>::selection{background:#e7b008}</style>" + (data.filingHtml || "");
   var pending = null;
+  var previewToken = 0;
 
   root.addEventListener("click", function (event) {
     var target = event.target;
@@ -28,12 +29,14 @@
     body.set("bundle", form.bundle.value);
     body.set("subject", form.subject.value);
     body.set("text", text);
+    var requestToken = ++previewToken;
     fetch(data.previewUrl, {
       method: "POST",
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: body
     }).then(function (response) {
       return response.text().then(function (raw) {
+        if (requestToken !== previewToken) return;
         var payload = null;
         try {
           payload = JSON.parse(raw);
@@ -232,6 +235,7 @@
     return "읽을 수 없습니다.";
   }
   function showRejection(reason) {
+    previewToken += 1;
     pending = null;
     showReason(reason);
     bar.hidden = false;
@@ -240,6 +244,7 @@
     document.getElementById("confirm-reason").textContent = text || "";
   }
   function hideBar() {
+    previewToken += 1;
     pending = null;
     bar.hidden = true;
   }
