@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dart_parser.gold.capture import (
     capture_rows,
+    confirm_value,
+    field_control,
     known_subject,
     money_group,
     parse_click,
@@ -141,3 +143,63 @@ def test_rows_follow_the_reading_order() -> None:
         "내부회계": ("내부회계",),
         "종속기업": ("종속기업",),
     }
+
+
+def test_confirm_value_keeps_evidence_rules_and_human_choice() -> None:
+    assert confirm_value("company_name", "value", "  주식회사 한일진공  ", "한일진공") == "한일진공"
+    assert confirm_value("company_name", "value", "   ", "한일진공") is None
+    assert confirm_value("opinion", "value", "한정의견을 표명합니다", "적정") == "적정"
+    assert confirm_value("opinion", "value", "한정의견", "없음") is None
+    assert (
+        confirm_value("document_title", "value", "연결감사보고서", "연결감사보고서")
+        == "연결감사보고서"
+    )
+    assert confirm_value("gaap", "value", "한국채택국제회계기준", "K-IFRS") == "K-IFRS"
+    assert confirm_value("icfr", "engagement", "감사", "audit") == "audit"
+    assert (
+        confirm_value("icfr", "opinion", "중요한 취약점", "부적정", icfr_engagement="audit")
+        == "부적정"
+    )
+    assert confirm_value("icfr", "opinion", "한정", "한정", icfr_engagement="audit") is None
+    assert confirm_value("icfr", "opinion", "한정", "한정", icfr_engagement=None) is None
+    assert confirm_value("icfr", "opinion", "한정", "한정", icfr_engagement="review") == "한정"
+    assert confirm_value("going_concern", "value", "계속기업", 0) == 0
+    assert confirm_value("going_concern", "value", "계속기업", True) is None
+    assert confirm_value("communications", "has_audit_committee", "있음", True) is True
+    assert confirm_value("communications", "has_audit_committee", "있음", "있음") is None
+    assert (
+        confirm_value("audit_report_date", "value", "2017년 3월 2일", "2017-03-02")
+        == "2017-03-02"
+    )
+    assert confirm_value("audit_report_date", "value", "날짜 없음", "") is None
+    assert confirm_value(
+        "current_period", "value", "부터", {"start": "2016-01-01", "end": "2016-12-31"}
+    ) == {"start": "2016-01-01", "end": "2016-12-31"}
+    amount = confirm_value(
+        "accounts", "total_asset@current", "19,506", 19506, unit_scale=1_000_000
+    )
+    assert amount == {
+        "raw": "19,506",
+        "value": 19506.0,
+        "unit_scale": 1_000_000,
+        "value_won": 19_506_000_000.0,
+    }
+    assert confirm_value("accounts", "revenue@current", "10", 10, unit_scale=None) is None
+    assert confirm_value("hours", "eqcr|headcount|current", "3명", 3) == 3.0
+    assert confirm_value("notes_toc", "value", "  일반사항 ", "일반사항") == "일반사항"
+    assert confirm_value("notes_toc", "value", "일반사항", "  ") is None
+    assert confirm_value(
+        "communications", "items", "2017년 3월 2일 회의", {"raw": "회의", "date": "2017-03-02"}
+    ) == {"raw": "회의", "date": "2017-03-02"}
+    assert confirm_value(
+        "communications", "items", "둘째", {"raw": "둘째", "date": ""}
+    ) == {"raw": "둘째"}
+    opinion = field_control("opinion", "value")
+    assert opinion.kind == "enum"
+    assert opinion.options[0] == ("적정", "적정")
+    assert (
+        field_control("icfr", "opinion", icfr_engagement=None).blocked
+        == "인증수준을 먼저 저장하세요"
+    )
+    assert field_control("company_name", "value").kind == "text"
+    assert field_control("accounts", "revenue@current").kind == "amount"
