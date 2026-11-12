@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from dart_parser.gold.db import migrate, open_gold
+from dart_parser.gold.db import migrate, open_catalog_readonly, open_gold
 from dart_parser.gold.schema import MIGRATIONS
 from gold_fixtures import make_catalog
 
@@ -42,6 +42,25 @@ def test_catalog_attached_read_only(tmp_path) -> None:
     assert conn.execute("SELECT count(*) FROM cat.disclosures").fetchone()[0] > 0
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("DELETE FROM cat.disclosures")
+
+
+def test_open_catalog_readonly_rejects_writes(tmp_path) -> None:
+    catalog = make_catalog(tmp_path)
+    conn = open_catalog_readonly(catalog)
+    try:
+        assert conn.execute("SELECT count(*) FROM disclosures").fetchone()[0] > 0
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 5000
+        for statement in (
+            "INSERT INTO disclosures (rcept_no) VALUES ('new-row')",
+            "UPDATE corps SET corp_name = '바꿈'",
+            "DELETE FROM disclosures",
+            "CREATE TABLE should_fail (id INTEGER)",
+        ):
+            with pytest.raises(sqlite3.OperationalError, match="readonly|query_only"):
+                conn.execute(statement)
+    finally:
+        conn.close()
 
 
 def test_pin_table_is_a_new_migration(tmp_path) -> None:

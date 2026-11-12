@@ -1,6 +1,7 @@
 """gold.db 연결과 스키마 마이그레이션.
 
-카탈로그는 ``mode=ro`` URI로만 ATTACH 한다.
+카탈로그는 ``mode=ro`` URI로만 연다. ``open_gold``는 필요하면 ATTACH 하고,
+``open_catalog_readonly``는 열었다가 바로 닫는 읽기 연결이다.
 """
 
 from __future__ import annotations
@@ -9,6 +10,18 @@ import sqlite3
 from pathlib import Path
 
 from dart_parser.gold.schema import MIGRATIONS
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """``with`` 블록이 끝나면 연결을 닫는다."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> None:
+        self.close()
 
 
 def open_gold(gold_path: Path, catalog_path: Path | None) -> sqlite3.Connection:
@@ -22,6 +35,29 @@ def open_gold(gold_path: Path, catalog_path: Path | None) -> sqlite3.Connection:
     if catalog_path is not None:
         catalog_uri = f"{Path(catalog_path).resolve().as_uri()}?mode=ro"
         conn.execute("ATTACH DATABASE ? AS cat", (catalog_uri,))
+    return conn
+
+
+def open_catalog_readonly(catalog_path: Path) -> sqlite3.Connection:
+    """카탈로그를 ``mode=ro``와 ``query_only``로 연다.
+
+    ``with`` 블록이 끝나면 연결을 닫는다. ``with`` 없이 쓰는 호출부는
+    ``finally``에서 ``close``한다.
+    """
+    catalog_uri = f"{Path(catalog_path).resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(
+        catalog_uri,
+        uri=True,
+        timeout=5.0,
+        factory=_ClosingConnection,
+    )
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+    except sqlite3.Error:
+        conn.close()
+        raise
     return conn
 
 
