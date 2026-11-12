@@ -54,11 +54,13 @@ _COVER = (
     ("company_name", "회사명"),
     ("document_title", "문서 제목"),
     ("fiscal_term", "기수"),
+    ("current_period", "보고기간"),
     ("auditor", "감사인"),
+)
+_OPINION = (
     ("opinion", "감사의견"),
     ("gaap", "회계기준"),
     ("audit_report_date", "감사보고서일"),
-    ("current_period", "보고기간"),
 )
 
 
@@ -89,6 +91,8 @@ def capture_rows() -> tuple[CaptureRow, ...]:
     rows: list[CaptureRow] = [
         CaptureRow("표지", bundle, "value", label) for bundle, label in _COVER
     ]
+    rows.extend(CaptureRow("의견", bundle, "value", label) for bundle, label in _OPINION)
+    rows.append(CaptureRow("의견", "going_concern", "value", "계속기업"))
     for account in BS_ACCOUNTS:
         for period, when in (("current", "당기"), ("prior", "전기")):
             rows.append(
@@ -109,6 +113,7 @@ def capture_rows() -> tuple[CaptureRow, ...]:
                     f"{_ACCOUNT_LABELS[account]} · {when}",
                 )
             )
+    rows.append(CaptureRow("주석 목차", "notes_toc", "value", "주석 목차"))
     for role, role_names in HOUR_ROLE_ALIASES.items():
         for metric, metric_names in HOUR_METRIC_ALIASES.items():
             for period, when in (("current", "당기"), ("prior", "전기")):
@@ -126,12 +131,25 @@ def capture_rows() -> tuple[CaptureRow, ...]:
     )
     rows.append(CaptureRow("커뮤니케이션", "communications", "has_audit_committee", "감사위원회"))
     rows.append(CaptureRow("커뮤니케이션", "communications", "items", "회차"))
-    rows.append(CaptureRow("나머지", "icfr", "engagement", "내부회계 업무"))
-    rows.append(CaptureRow("나머지", "icfr", "opinion", "내부회계 의견"))
-    rows.append(CaptureRow("나머지", "going_concern", "value", "계속기업"))
-    rows.append(CaptureRow("나머지", "subsidiary", "value", "종속기업 수"))
-    rows.append(CaptureRow("나머지", "notes_toc", "value", "주석 목차"))
+    rows.append(CaptureRow("내부회계", "icfr", "engagement", "인증수준"))
+    rows.append(CaptureRow("내부회계", "icfr", "opinion", "내부회계 의견"))
+    rows.append(CaptureRow("종속기업", "subsidiary", "value", "종속기업 수"))
     return tuple(rows)
+
+
+def section_jumps() -> dict[str, tuple[str, ...]]:
+    return {
+        "표지": (),
+        "의견": ("감사의견",),
+        "재무상태표": ("재무상태표", "대차대조표"),
+        "손익계산서": ("손익계산서", "포괄손익계산서"),
+        "주석 목차": ("주석",),
+        "감사시간": ("감사시간",),
+        "실시내용": ("감사실시내용",),
+        "커뮤니케이션": ("커뮤니케이션",),
+        "내부회계": ("내부회계",),
+        "종속기업": ("종속기업",),
+    }
 
 
 def parse_click(

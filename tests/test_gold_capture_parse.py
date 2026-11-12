@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from dart_parser.gold.capture import capture_rows, known_subject, money_group, parse_click
+from dart_parser.gold.capture import (
+    capture_rows,
+    known_subject,
+    money_group,
+    parse_click,
+    section_jumps,
+)
 from dart_parser.parser.lexicon import HOUR_METRIC_ALIASES, HOUR_ROLE_ALIASES
 
 
@@ -92,3 +98,46 @@ def test_rows_cover_each_capture_cell_once() -> None:
     assert known_subject("accounts", "total_asset@current")
     assert not known_subject("accounts", "table")
     assert {row.group for row in rows if row.bundle == "accounts"} == {"재무상태표", "손익계산서"}
+
+
+def test_rows_follow_the_reading_order() -> None:
+    rows = capture_rows()
+    groups = list(dict.fromkeys(row.group for row in rows))
+    assert groups == [
+        "표지",
+        "의견",
+        "재무상태표",
+        "손익계산서",
+        "주석 목차",
+        "감사시간",
+        "실시내용",
+        "커뮤니케이션",
+        "내부회계",
+        "종속기업",
+    ]
+    assert "나머지" not in groups
+    by_bundle = {row.bundle: row.group for row in rows}
+    assert by_bundle["company_name"] == "표지"
+    assert by_bundle["document_title"] == "표지"
+    assert by_bundle["current_period"] == "표지"
+    assert by_bundle["auditor"] == "표지"
+    assert by_bundle["opinion"] == "의견"
+    assert by_bundle["gaap"] == "의견"
+    assert by_bundle["audit_report_date"] == "의견"
+    assert by_bundle["going_concern"] == "의견"
+    assert by_bundle["notes_toc"] == "주석 목차"
+    assert by_bundle["icfr"] == "내부회계"
+    assert by_bundle["subsidiary"] == "종속기업"
+    assert next(row.label for row in rows if row.subject == "engagement") == "인증수준"
+    assert section_jumps() == {
+        "표지": (),
+        "의견": ("감사의견",),
+        "재무상태표": ("재무상태표", "대차대조표"),
+        "손익계산서": ("손익계산서", "포괄손익계산서"),
+        "주석 목차": ("주석",),
+        "감사시간": ("감사시간",),
+        "실시내용": ("감사실시내용",),
+        "커뮤니케이션": ("커뮤니케이션",),
+        "내부회계": ("내부회계",),
+        "종속기업": ("종속기업",),
+    }
