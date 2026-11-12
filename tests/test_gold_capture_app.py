@@ -151,6 +151,39 @@ def _capture(tmp_path: Path, bundle: str, subject: str) -> sqlite3.Row | None:
     return row
 
 
+def test_desk_is_a_reading_room_with_ten_sections(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    for name in (
+        "표지",
+        "의견",
+        "재무상태표",
+        "손익계산서",
+        "주석 목차",
+        "감사시간",
+        "실시내용",
+        "커뮤니케이션",
+        "내부회계",
+        "종속기업",
+    ):
+        assert f'data-section="{name}"' in page
+    assert page.count("<section ") == 10
+    assert 'id="sections"' in page
+    assert 'id="confirm"' in page
+    assert "--mark:#e7b008" in page.replace(" ", "")
+    assert "--bar:#243028" in page.replace(" ", "")
+    assert "fonts.googleapis.com" not in page
+    assert "<iframe" not in page.lower()
+    data = json.loads(
+        re.search(r'id="capture-data"[^>]*>(.*?)</script>', page, re.DOTALL).group(1)
+    )
+    assert data["previewUrl"] == "/doc/R100/D100/preview"
+    assert data["sections"]["손익계산서"] == ["손익계산서", "포괄손익계산서"]
+    assert data["sections"]["표지"] == []
+    app.close()
+
+
 def test_document_page_is_capture_without_an_iframe(tmp_path: Path) -> None:
     app = _build(tmp_path)
     _write_cache(
