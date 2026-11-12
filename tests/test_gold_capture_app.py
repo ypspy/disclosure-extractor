@@ -915,3 +915,208 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     assert "scrollIntoView" in toc
     assert toc.index("preventDefault()") < toc.index("getElementById")
     app.close()
+
+
+def _request_host(
+    app: ReviewApplication,
+    path: str,
+    host: str,
+) -> tuple[str, dict[str, str], bytes]:
+    environ = {"PATH_INFO": path, "QUERY_STRING": "", "REQUEST_METHOD": "GET"}
+    setup_testing_defaults(environ)
+    environ["HTTP_HOST"] = host
+    environ["SERVER_PORT"] = "80"
+    environ["wsgi.input"] = io.BytesIO()
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]], exc_info=None) -> None:
+        del exc_info
+        captured["status"] = status
+        captured["headers"] = {key: value for key, value in headers}
+
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), dict(captured["headers"]), body
+
+
+def _post_json(
+    app: ReviewApplication,
+    path: str,
+    fields: dict[str, str],
+) -> tuple[str, dict[str, str], bytes]:
+    document = "/" + "/".join(path.strip("/").split("/")[:3])
+    _status, _headers, page = _request(app, "GET", document)
+    match = re.search(r'name="token" value="([^"]*)"', page.decode())
+    assert match is not None
+    payload = dict(fields)
+    payload["token"] = match.group(1)
+    raw = urlencode(payload).encode("utf-8")
+    environ = {
+        "PATH_INFO": path,
+        "QUERY_STRING": "",
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        "CONTENT_LENGTH": str(len(raw)),
+        "HTTP_HOST": "localhost:80",
+        "SERVER_PORT": "80",
+        "HTTP_ACCEPT": "application/json",
+    }
+    setup_testing_defaults(environ)
+    environ["REQUEST_METHOD"] = "POST"
+    environ["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    environ["CONTENT_LENGTH"] = str(len(raw))
+    environ["HTTP_HOST"] = "localhost:80"
+    environ["SERVER_PORT"] = "80"
+    environ["HTTP_ACCEPT"] = "application/json"
+    environ["wsgi.input"] = io.BytesIO(raw)
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]], exc_info=None) -> None:
+        del exc_info
+        captured["status"] = status
+        captured["headers"] = {key: value for key, value in headers}
+
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), dict(captured["headers"]), body
+
+
+def test_desk_splits_the_filing_and_keeps_host_styles_outside(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    compact = page.replace(" ", "")
+    assert "--split:60%" in compact
+    assert "position:sticky" in compact
+    assert 'id="pane-resizer"' in page
+    assert 'role="separator"' in page
+    assert 'id="export-json"' in page
+    assert 'href="/doc/R100/D100/export"' in page
+    assert "JSON Export" in page
+    assert 'id="auto-advance"' in page
+    assert 'id="field-picker"' in page
+    assert "<iframe" not in page.lower()
+    assert "onclick=" not in page
+    assert "function (" not in page
+    assert "default-src 'none'" in headers["Content-Security-Policy"]
+    filing = page.split('id="filing"', 1)[1].split("</div>", 1)[0]
+    assert "<style" not in filing
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert "gold-source" not in style
+    assert "gold-snap" not in style
+    assert 'id="doc-progress"' in page
+    script_status, _script_headers, script_body = _request(app, "GET", "/static/capture.js")
+    assert script_status == "200 OK"
+    script = script_body.decode()
+    assert "attachShadow" in script
+    assert 'root.innerHTML = "<style>' in script
+    assert "gold-source" in script
+    assert "::selection{background:#e7b008}" in script
+    assert "normalizeText" in script
+    assert 'closest("td, th, p")' in script
+    assert "isCollapsed" in script
+    assert "cell_click" in script
+    assert "text_drag" in script
+    assert "manual_edit" in script
+    assert '"Accept": "application/json"' in script
+    assert "proposalConfirmed" in script
+    assert "payload.blocked" in script
+    assert "gold-auto-advance" in script
+    assert "nextEmpty" in script
+    assert "sessionStorage.setItem(autoKey" in script
+    assert "scrollToLocator" in script
+    assert "scrollIntoView" in script
+    assert "css_selector" in script
+    assert "start_offset" in script
+    assert "end_offset" in script
+    assert "xpath" in script
+    assert "field-picker" in script
+    assert "켜진 칸이 없다" in script
+    assert "undoStack" in script
+    assert "ctrlKey" in script
+    assert "metaKey" in script
+    assert "selection_method" in script
+    assert "exportUrl" in script
+    assert "gold-split" in script
+    app.close()
+
+
+def test_export_lists_saved_rows_without_writing(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    empty_status, empty_headers, empty_body = _request(app, "GET", "/doc/R100/D100/export")
+    assert empty_status == "200 OK"
+    assert empty_headers["Content-Type"].startswith("application/json")
+    assert json.loads(empty_body) == []
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나회사",
+            "confirmed": json.dumps("가나회사"),
+        },
+    )
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    before = conn.execute(
+        "SELECT bundle, subject, status, value, evidence FROM gold_captures"
+    ).fetchall()
+    conn.close()
+    status, headers, body = _request(app, "GET", "/doc/R100/D100/export")
+    assert status == "200 OK"
+    assert headers["Content-Type"].startswith("application/json")
+    assert "attachment;" in headers["Content-Disposition"]
+    rows = json.loads(body)
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "R100/D100"
+    assert rows[0]["field_key"] == "company_name/value"
+    assert rows[0]["extracted_value"] == "가나회사"
+    assert rows[0]["raw_text"] == "가나회사"
+    assert rows[0]["locator"] is None
+    assert rows[0]["selection_method"] is None
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    after = conn.execute(
+        "SELECT bundle, subject, status, value, evidence FROM gold_captures"
+    ).fetchall()
+    conn.close()
+    assert after == before
+    foreign, _headers, foreign_body = _request_host(app, "/doc/R100/D100/export", "evil.test:80")
+    assert foreign.startswith("403")
+    assert "가나회사".encode() not in foreign_body
+    posted, _headers, _body = _request(app, "POST", "/doc/R100/D100/export")
+    assert posted.startswith("405")
+    app.close()
+
+
+def test_json_accept_saves_in_place_and_still_requires_confirmed(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, headers, body = _post_json(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나회사",
+            "confirmed": json.dumps("가나회사"),
+        },
+    )
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    assert "Location" not in headers
+    payload = json.loads(body)
+    assert payload["ok"] is True
+    assert payload["shown"] == "가나회사"
+    assert payload["replay"] == "가나회사"
+    assert payload["cleared"] is False
+    assert payload["recorded"] == 1
+    saved = _capture(tmp_path, "company_name", "value")
+    assert saved is not None
+    assert json.loads(saved["value"]) == "가나회사"
+    rejected, _headers, rejected_body = _post_json(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "auditor", "subject": "value", "text": "삼일"},
+    )
+    assert rejected.startswith("422")
+    assert json.loads(rejected_body)["ok"] is False
+    assert _capture(tmp_path, "auditor", "value") is None
+    assert json.loads(_capture(tmp_path, "company_name", "value")["value"]) == "가나회사"
+    app.close()

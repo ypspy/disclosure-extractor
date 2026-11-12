@@ -838,6 +838,67 @@ def test_finished_recapture_locks_the_second_pass_preview(tmp_path: Path) -> Non
     app.close()
 
 
+def test_recapture_export_omits_the_first_pass_and_does_not_write(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS1-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS1-VALUE-ZZ", ensure_ascii=False),),
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_recaptures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'auditor', 'value', 'found', ?, '2차감사인', 't'
+        )
+        """,
+        (json.dumps("2차감사인", ensure_ascii=False),),
+    )
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES)
+    status, headers, body = _request(app, "GET", "/recapture/R100/D100/export")
+    text = body.decode()
+    assert status == "200 OK"
+    assert headers["Content-Type"].startswith("application/json")
+    assert "PASS1-VALUE-ZZ" not in text
+    assert "PASS1-EVIDENCE-ZZ" not in text
+    rows = json.loads(body)
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "R100/D100"
+    assert rows[0]["field_key"] == "auditor/value"
+    assert rows[0]["extracted_value"] == "2차감사인"
+    assert rows[0]["raw_text"] == "2차감사인"
+    assert rows[0]["locator"] is None
+    assert rows[0]["selection_method"] is None
+    assert _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES) == before
+    locked, locked_headers, locked_body = _request(app, "GET", "/doc/R100/D100/export")
+    locked_text = locked_body.decode()
+    assert locked.startswith("409")
+    assert locked_text == "재입수 중"
+    assert "PASS1-VALUE-ZZ" not in locked_text
+    assert "PASS1-EVIDENCE-ZZ" not in locked_text
+    assert "default-src 'none'" in locked_headers["Content-Security-Policy"]
+    page_status, page_headers, page = _request(app, "GET", "/recapture/R100/D100")
+    shown = page.decode()
+    assert page_status == "200 OK"
+    assert 'href="/recapture/R100/D100/export"' in shown
+    assert "PASS1-VALUE-ZZ" not in shown
+    assert "PASS1-EVIDENCE-ZZ" not in shown
+    assert "onclick=" not in shown
+    assert "function (" not in shown
+    assert "default-src 'none'" in page_headers["Content-Security-Policy"]
+    app.close()
+
+
 def test_recapture_page_points_preview_at_the_second_pass(tmp_path: Path) -> None:
     app = _build(tmp_path)
     conn = sqlite3.connect(tmp_path / "gold.db")
