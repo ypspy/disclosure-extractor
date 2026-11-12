@@ -39,6 +39,15 @@
   root.addEventListener("submit", function (event) {
     event.preventDefault();
   });
+  document.addEventListener("click", function (event) {
+    var link = event.target && event.target.closest
+      ? event.target.closest("a[data-scroll]")
+      : null;
+    if (!link) return;
+    event.preventDefault();
+    var target = root.getElementById(link.getAttribute("data-scroll"));
+    if (target && target.scrollIntoView) target.scrollIntoView();
+  });
   root.addEventListener("pointerup", function () {
     var form = selectedRow();
     if (!form) {

@@ -731,3 +731,123 @@ def test_recapture_routes_do_not_download_sample_or_capture(
     assert posted.startswith("303")
     assert report == "200 OK"
     app.close()
+
+
+_PASS_TABLES = (
+    "SELECT * FROM gold_captures ORDER BY rcept_no, dcm_no, bundle, subject",
+    "SELECT * FROM gold_samples ORDER BY run_id, rcept_no, dcm_no",
+)
+
+
+def test_preview_rejects_a_missing_token_or_a_foreign_origin(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    before = _stored(tmp_path / "gold.db", _PASS_TABLES)
+    fields = {"bundle": "opinion", "subject": "value", "text": "한정의견을 표명합니다"}
+    missing, _headers, missing_body = _raw_post(app, "/doc/R100/D100/preview", fields)
+    foreign, _headers, foreign_body = _raw_post(
+        app,
+        "/doc/R100/D100/preview",
+        {"token": app.token, **fields},
+        origin="https://evil.example",
+    )
+    assert missing.startswith("403")
+    assert foreign.startswith("403")
+    assert app.token not in missing_body.decode()
+    assert app.token not in foreign_body.decode()
+    assert _stored(tmp_path / "gold.db", _PASS_TABLES) == before
+    app.close()
+
+
+def test_first_pass_preview_stays_locked_while_recapture_is_open(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS1-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS1-CELL-ZZ", ensure_ascii=False),),
+    )
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _PASS_TABLES)
+    status, _headers, body = _raw_post(
+        app,
+        "/doc/R100/D100/preview",
+        {
+            "token": app.token,
+            "bundle": "opinion",
+            "subject": "value",
+            "text": "한정의견을 표명합니다",
+        },
+    )
+    text = body.decode()
+    assert status.startswith("409")
+    assert json.loads(text) == {"error": "재입수 중"}
+    assert "PASS1-CELL-ZZ" not in text
+    assert "PASS1-EVIDENCE-ZZ" not in text
+    assert "missing-rows" not in text
+    assert "빠진" not in text
+    assert _stored(tmp_path / "gold.db", _PASS_TABLES) == before
+    app.close()
+
+
+def test_finished_recapture_locks_the_second_pass_preview(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    _open_status(conn)
+    conn.execute(
+        """
+        UPDATE gold_recapture_status
+        SET status = 'done', finished_at = '2026-07-02T00:00:00+00:00'
+        WHERE rcept_no = 'R100'
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_recaptures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS2-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS2-CELL-ZZ", ensure_ascii=False),),
+    )
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _RECAPTURE_TABLES)
+    status, _headers, body = _raw_post(
+        app,
+        "/recapture/R100/D100/preview",
+        {
+            "token": app.token,
+            "bundle": "opinion",
+            "subject": "value",
+            "text": "한정의견을 표명합니다",
+        },
+    )
+    text = body.decode()
+    assert status.startswith("409")
+    assert json.loads(text) == {"error": "재입수가 끝났습니다"}
+    assert "PASS2-CELL-ZZ" not in text
+    assert _stored(tmp_path / "gold.db", _RECAPTURE_TABLES) == before
+    app.close()
+
+
+def test_recapture_page_points_preview_at_the_second_pass(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    status, _headers, body = _request(app, "GET", "/recapture/R100/D100")
+    page = body.decode()
+    assert status == "200 OK"
+    raw = page.split('id="capture-data"', 1)[1]
+    raw = raw.split(">", 1)[1].split("</script>", 1)[0]
+    assert json.loads(raw)["previewUrl"] == "/recapture/R100/D100/preview"
+    app.close()

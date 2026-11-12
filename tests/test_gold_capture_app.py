@@ -909,4 +909,9 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     before_pending = preview.split("response.text()", 1)[1].split("pending =", 1)[0]
     assert "requestToken !== previewToken" in before_pending
     assert before_pending.index("requestToken !== previewToken") < before_pending.index("return")
+    assert 'a[data-scroll]' in script
+    toc = script.split('a[data-scroll]', 1)[1]
+    assert "data-scroll" in toc
+    assert "scrollIntoView" in toc
+    assert toc.index("preventDefault()") < toc.index("getElementById")
     app.close()
