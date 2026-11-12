@@ -883,6 +883,28 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     assert "켜진 칸이 없다" in script
     assert "드래그 글자가 비어 있다" in script
     assert "response.text()" in script.split("confirm-save", 1)[1]
+    save = script.split('getElementById("confirm-save")', 1)[1].split(
+        'getElementById("confirm-cancel")', 1
+    )[0]
+    assert "miss_bundle=" in save
+    assert "miss_subject=" in save
+    assert 'showReason("읽을 수 없습니다.")' in save
+    assert "showRejection" not in save
+    assert "pending = null" not in save
+    assert save.index("miss_bundle=") < save.index("window.location.assign(response.url)")
+    assert save.index("sessionStorage.setItem") < save.index(
+        "window.location.assign(response.url)"
+    )
+    assert "response.text()" in save
+    boot = script.split('root.addEventListener("click"', 1)[0]
+    assert 'sessionStorage.getItem("gold-open-section")' in boot
+    assert 'sessionStorage.removeItem("gold-open-section")' in boot
+    assert "restoreOpenSection()" in boot
+    assert 'setAttribute("data-active", "1")' in boot
+    assert 'removeAttribute("data-active")' in boot
+    assert 'setAttribute("aria-pressed"' in boot
+    assert "hideBar()" not in boot
+    assert ".checked" not in boot
     preview = script.split("confirm-save", 1)[0]
     before_pending = preview.split("response.text()", 1)[1].split("pending =", 1)[0]
     assert "requestToken !== previewToken" in before_pending

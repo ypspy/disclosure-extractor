@@ -8,6 +8,29 @@
   root.innerHTML = "<style>::selection{background:#e7b008}</style>" + (data.filingHtml || "");
   var pending = null;
   var previewToken = 0;
+  restoreOpenSection();
+
+  function restoreOpenSection() {
+    var stored = sessionStorage.getItem("gold-open-section");
+    if (stored === null) return;
+    sessionStorage.removeItem("gold-open-section");
+    if (!stored) return;
+    var sections = document.querySelectorAll("section[data-section]");
+    var match = null;
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].getAttribute("data-section") === stored) match = sections[i];
+    }
+    if (!match) return;
+    for (var j = 0; j < sections.length; j++) {
+      if (sections[j] === match) sections[j].setAttribute("data-active", "1");
+      else sections[j].removeAttribute("data-active");
+    }
+    var rails = document.querySelectorAll("#sections button");
+    for (var k = 0; k < rails.length; k++) {
+      var pressed = rails[k].getAttribute("data-section") === stored;
+      rails[k].setAttribute("aria-pressed", pressed ? "true" : "false");
+    }
+  }
 
   root.addEventListener("click", function (event) {
     var target = event.target;
@@ -78,7 +101,17 @@
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: body
     }).then(function (response) {
+      var landed = response.url || "";
+      if (landed.indexOf("miss_bundle=") !== -1 || landed.indexOf("miss_subject=") !== -1) {
+        showReason("읽을 수 없습니다.");
+        bar.hidden = false;
+        return;
+      }
       if (response.redirected || response.ok) {
+        var open = document.querySelector("section[data-section][data-active]");
+        if (open) {
+          sessionStorage.setItem("gold-open-section", open.getAttribute("data-section") || "");
+        }
         window.location.assign(response.url);
         return;
       }
