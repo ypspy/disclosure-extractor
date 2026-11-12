@@ -36,7 +36,7 @@ from dart_parser.gold.capture_html import (
     toc_from_cache,
     toc_ids_present,
 )
-from dart_parser.gold.capture_page import render_capture_page
+from dart_parser.gold.capture_page import capture_feedback, render_capture_page
 from dart_parser.gold.capture_store import (
     clear_capture,
     finish_recapture,
@@ -271,6 +271,23 @@ class ReviewApplication:
             return _html(start_response, "404 Not Found", "페이지가 없습니다.")
         if parts[:1] == ["recapture"]:
             return _recapture(self, environ, start_response, method, parts[1:], query)
+        if (
+            len(parts) == 4
+            and parts[0] == "doc"
+            and parts[3] == "export"
+            and _safe_id(parts[1])
+            and _safe_id(parts[2])
+        ):
+            if method != "GET":
+                return _html(
+                    start_response,
+                    "405 Method Not Allowed",
+                    "GET만 받습니다.",
+                    [("Allow", "GET")],
+                )
+            return _get_export(
+                self, environ, start_response, parts[1], parts[2], capture_pass=1
+            )
         if parts == ["next"] and method == "GET":
             return _next_document(self, start_response, query)
         if (
@@ -458,6 +475,10 @@ def _json(start_response: Any, status: str, payload: Any) -> list[bytes]:
     return [body]
 
 
+def _wants_json(environ: dict[str, Any]) -> bool:
+    return "application/json" in str(environ.get("HTTP_ACCEPT") or "")
+
+
 def _confirmed(raw: str) -> Any:
     if raw == "":
         return None
@@ -470,7 +491,10 @@ def _confirmed(raw: str) -> Any:
 def _host_allowed(environ: dict[str, Any]) -> bool:
     host = str(environ.get("HTTP_HOST") or "")
     port = str(environ.get("SERVER_PORT") or "")
-    return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+    allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    if port in {"80", ""}:
+        allowed.update({"127.0.0.1", "localhost"})
+    return host in allowed
 
 
 def _origin_allowed(environ: dict[str, Any]) -> bool:
@@ -669,15 +693,27 @@ def _post_capture(
             conn, rcept_no, dcm_no, bundle, subject, index, capture_pass=capture_pass
         ):
             return _html(start_response, "400 Bad Request", "지우지 못했습니다.")
+        if _wants_json(environ):
+            return _capture_json(
+                app, start_response, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass
+            )
         return _see_other(start_response, rcept_no, dcm_no, base)
     if status in _ABSENT:
         if not set_capture_status(
             conn, rcept_no, dcm_no, bundle, subject, status, capture_pass=capture_pass
         ):
             return _html(start_response, "400 Bad Request", "저장하지 못했습니다.")
+        if _wants_json(environ):
+            return _capture_json(
+                app, start_response, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass
+            )
         return _see_other(start_response, rcept_no, dcm_no, base)
     if status == "clear":
         clear_capture(conn, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass)
+        if _wants_json(environ):
+            return _capture_json(
+                app, start_response, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass
+            )
         return _see_other(start_response, rcept_no, dcm_no, base)
     if not save_capture(
         conn,
@@ -689,6 +725,17 @@ def _post_capture(
         confirmed=_confirmed(_one(form, "confirmed")),
         capture_pass=capture_pass,
     ):
+        if _wants_json(environ):
+            return _json(
+                start_response,
+                "422 Unprocessable Entity",
+                {
+                    "ok": False,
+                    "error": "읽을 수 없습니다.",
+                    "miss_bundle": bundle,
+                    "miss_subject": subject,
+                },
+            )
         location = (
             f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}"
             f"?miss_bundle={quote(bundle)}&miss_subject={quote(subject)}"
@@ -699,7 +746,102 @@ def _post_capture(
             "읽을 수 없습니다.",
             [("Location", location)],
         )
+    if _wants_json(environ):
+        return _capture_json(
+            app, start_response, rcept_no, dcm_no, bundle, subject, capture_pass=capture_pass
+        )
     return _see_other(start_response, rcept_no, dcm_no, base)
+
+
+def _capture_json(
+    app: ReviewApplication,
+    start_response: Any,
+    rcept_no: str,
+    dcm_no: str,
+    bundle: str,
+    subject: str,
+    *,
+    capture_pass: int,
+) -> list[bytes]:
+    saved = load_captures(app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass)
+    feedback = capture_feedback(bundle, subject, saved.get((bundle, subject)))
+    return _json(
+        start_response,
+        "200 OK",
+        {
+            "ok": True,
+            "bundle": bundle,
+            "subject": subject,
+            "status": feedback["status"],
+            "value": feedback["value"],
+            "evidence": feedback["evidence"],
+            "shown": feedback["shown"],
+            "lines": feedback["lines"],
+            "replay": feedback["replay"],
+            "recorded": len(saved),
+            "row_total": len(capture_rows()),
+            "cleared": (bundle, subject) not in saved,
+        },
+    )
+
+
+def _get_export(
+    app: ReviewApplication,
+    environ: dict[str, Any],
+    start_response: Any,
+    rcept_no: str,
+    dcm_no: str,
+    *,
+    capture_pass: int,
+) -> list[bytes]:
+    """저장 표만 읽는다. 위치와 선택 방법은 넣지 않는다."""
+    if not _host_allowed(environ):
+        return _reject(start_response)
+    if capture_pass == 1 and recapture_in_progress(app.store.conn, rcept_no, dcm_no):
+        return _html(start_response, "409 Conflict", "재입수 중")
+    sample = app.store.sample(rcept_no, dcm_no)
+    if sample is None:
+        return _json(start_response, "404 Not Found", {"error": "문서가 없습니다."})
+    if capture_pass == 2 and not can_open_recapture(
+        app.store.conn, str(sample["run_id"]), rcept_no, dcm_no
+    ):
+        return _html(start_response, "409 Conflict", "재입수 대상이 아닙니다.")
+    saved = load_captures(app.store.conn, rcept_no, dcm_no, capture_pass=capture_pass)
+    doc_id = f"{rcept_no}/{dcm_no}"
+    records: list[dict[str, Any]] = []
+    for row in capture_rows():
+        record = saved.get((row.bundle, row.subject))
+        if record is None:
+            continue
+        value = None
+        raw_value = record["value"]
+        if raw_value:
+            try:
+                value = json.loads(raw_value)
+            except (TypeError, json.JSONDecodeError):
+                value = None
+        records.append(
+            {
+                "doc_id": doc_id,
+                "field_key": f"{row.bundle}/{row.subject}",
+                "extracted_value": value,
+                "raw_text": str(record["evidence"] or ""),
+                "locator": None,
+                "selection_method": None,
+            }
+        )
+    body = json.dumps(records, ensure_ascii=False).encode()
+    filename = f"gold-{rcept_no}-{dcm_no}.json"
+    start_response(
+        "200 OK",
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+            ("Content-Disposition", f'attachment; filename="{filename}"'),
+            ("X-Content-Type-Options", "nosniff"),
+        ],
+    )
+    return [body]
 
 
 def _post_unit(
@@ -872,6 +1014,22 @@ def _recapture(
 ) -> list[bytes]:
     if parts == ["next"] and method == "GET":
         return _next_recapture_document(app, start_response, query)
+    if (
+        len(parts) == 3
+        and parts[2] == "export"
+        and _safe_id(parts[0])
+        and _safe_id(parts[1])
+    ):
+        if method != "GET":
+            return _html(
+                start_response,
+                "405 Method Not Allowed",
+                "GET만 받습니다.",
+                [("Allow", "GET")],
+            )
+        return _get_export(
+            app, environ, start_response, parts[0], parts[1], capture_pass=2
+        )
     if parts == ["report"] and method == "GET":
         return _recapture_report(app, start_response, query)
     if parts == ["adjudication"] and method == "GET":
