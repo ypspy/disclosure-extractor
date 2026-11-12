@@ -868,3 +868,15 @@ def test_capture_without_confirmed_does_not_write(tmp_path: Path) -> None:
     assert "miss_subject=value" in headers["Location"]
     assert _capture(tmp_path, "company_name", "value") is None
     app.close()
+
+
+def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, _headers, body = _request(app, "GET", "/static/capture.js")
+    script = body.decode()
+    assert "getSelection" in script
+    assert "previewUrl" in script
+    assert "confirmed" in script
+    assert "event.target.textContent" not in script
+    assert "fonts.googleapis.com" not in script
+    app.close()
