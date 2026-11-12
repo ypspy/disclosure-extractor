@@ -27,8 +27,12 @@ def _conn(tmp_path):
 def test_click_stores_an_amount_and_ignores_an_unreadable_cell(tmp_path) -> None:
     conn = _conn(tmp_path)
     assert set_unit(conn, "R", "D", "bs", 1_000_000)
-    assert save_capture(conn, "R", "D", "accounts", "total_asset@current", "19,506")
-    assert not save_capture(conn, "R", "D", "accounts", "current_asset@current", "없음")
+    assert save_capture(
+        conn, "R", "D", "accounts", "total_asset@current", "19,506", confirmed=19506
+    )
+    assert not save_capture(
+        conn, "R", "D", "accounts", "current_asset@current", "없음", confirmed="없음"
+    )
     row = load_captures(conn, "R", "D")[("accounts", "total_asset@current")]
     assert row["status"] == "found"
     assert json.loads(row["value"])["value_won"] == 19_506_000_000.0
@@ -39,16 +43,16 @@ def test_click_stores_an_amount_and_ignores_an_unreadable_cell(tmp_path) -> None
 
 def test_amount_click_before_a_unit_does_not_insert(tmp_path) -> None:
     conn = _conn(tmp_path)
-    assert not save_capture(conn, "R", "D", "accounts", "revenue@current", "10")
+    assert not save_capture(conn, "R", "D", "accounts", "revenue@current", "10", confirmed=10)
     assert load_captures(conn, "R", "D") == {}
 
 
 def test_changing_the_unit_recomputes_only_scale_and_won(tmp_path) -> None:
     conn = _conn(tmp_path)
     set_unit(conn, "R", "D", "is", 1_000)
-    save_capture(conn, "R", "D", "accounts", "revenue@current", "10")
+    save_capture(conn, "R", "D", "accounts", "revenue@current", "10", confirmed=10)
     set_unit(conn, "R", "D", "bs", 1)
-    save_capture(conn, "R", "D", "accounts", "total_asset@current", "5")
+    save_capture(conn, "R", "D", "accounts", "total_asset@current", "5", confirmed=5)
     assert set_unit(conn, "R", "D", "is", 1_000_000)
     revenue = json.loads(load_captures(conn, "R", "D")[("accounts", "revenue@current")]["value"])
     asset = json.loads(load_captures(conn, "R", "D")[("accounts", "total_asset@current")]["value"])
@@ -61,13 +65,21 @@ def test_changing_the_unit_recomputes_only_scale_and_won(tmp_path) -> None:
 
 def test_changed_icfr_engagement_drops_the_opinion(tmp_path) -> None:
     conn = _conn(tmp_path)
-    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토")
-    assert save_capture(conn, "R", "D", "icfr", "opinion", "한정")
-    assert not save_capture(conn, "R", "D", "icfr", "engagement", "감사 및 검토")
+    assert save_capture(
+        conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토", confirmed="review"
+    )
+    assert save_capture(conn, "R", "D", "icfr", "opinion", "한정", confirmed="한정")
+    assert not save_capture(
+        conn, "R", "D", "icfr", "engagement", "감사 및 검토", confirmed="audit-and-review"
+    )
     assert ("icfr", "opinion") in load_captures(conn, "R", "D")
-    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토")
+    assert save_capture(
+        conn, "R", "D", "icfr", "engagement", "내부회계관리제도 검토", confirmed="review"
+    )
     assert ("icfr", "opinion") in load_captures(conn, "R", "D")
-    assert save_capture(conn, "R", "D", "icfr", "engagement", "내부회계관리제도 감사")
+    assert save_capture(
+        conn, "R", "D", "icfr", "engagement", "내부회계관리제도 감사", confirmed="audit"
+    )
     saved = load_captures(conn, "R", "D")
     assert json.loads(saved[("icfr", "engagement")]["value"]) == "audit"
     assert ("icfr", "opinion") not in saved
@@ -86,12 +98,22 @@ def test_absent_status_and_clear(tmp_path) -> None:
 
 def test_notes_and_rounds_append(tmp_path) -> None:
     conn = _conn(tmp_path)
-    save_capture(conn, "R", "D", "notes_toc", "value", "일반사항")
-    save_capture(conn, "R", "D", "notes_toc", "value", "재고자산")
+    save_capture(conn, "R", "D", "notes_toc", "value", "일반사항", confirmed="일반사항")
+    save_capture(conn, "R", "D", "notes_toc", "value", "재고자산", confirmed="재고자산")
     notes = json.loads(load_captures(conn, "R", "D")[("notes_toc", "value")]["value"])
     assert notes == {"count": 2, "titles": ["일반사항", "재고자산"]}
-    save_capture(conn, "R", "D", "communications", "items", "2017년 3월 2일 회의")
-    save_capture(conn, "R", "D", "communications", "items", "둘째 회의")
+    save_capture(
+        conn,
+        "R",
+        "D",
+        "communications",
+        "items",
+        "2017년 3월 2일 회의",
+        confirmed={"raw": "2017년 3월 2일 회의", "date": "2017-03-02"},
+    )
+    save_capture(
+        conn, "R", "D", "communications", "items", "둘째 회의", confirmed={"raw": "둘째 회의"}
+    )
     items = json.loads(load_captures(conn, "R", "D")[("communications", "items")]["value"])
     assert [item["round"] for item in items] == [1, 2]
     assert items[0]["date"] == "2017-03-02"
@@ -99,9 +121,9 @@ def test_notes_and_rounds_append(tmp_path) -> None:
 
 def test_notes_reject_a_duplicate_and_drop_one_title(tmp_path) -> None:
     conn = _conn(tmp_path)
-    save_capture(conn, "R", "D", "notes_toc", "value", "일반사항")
-    assert save_capture(conn, "R", "D", "notes_toc", "value", "  일반사항 ")
-    save_capture(conn, "R", "D", "notes_toc", "value", "재고자산")
+    save_capture(conn, "R", "D", "notes_toc", "value", "일반사항", confirmed="일반사항")
+    assert save_capture(conn, "R", "D", "notes_toc", "value", "  일반사항 ", confirmed="일반사항")
+    save_capture(conn, "R", "D", "notes_toc", "value", "재고자산", confirmed="재고자산")
     notes = json.loads(load_captures(conn, "R", "D")[("notes_toc", "value")]["value"])
     assert notes == {"count": 2, "titles": ["일반사항", "재고자산"]}
     from dart_parser.gold.capture_store import remove_list_item
@@ -118,9 +140,27 @@ def test_notes_reject_a_duplicate_and_drop_one_title(tmp_path) -> None:
 
 def test_communication_rounds_skip_duplicates_and_renumber(tmp_path) -> None:
     conn = _conn(tmp_path)
-    save_capture(conn, "R", "D", "communications", "items", "2017년 3월 2일 회의")
-    assert save_capture(conn, "R", "D", "communications", "items", "  2017년 3월 2일 회의 ")
-    save_capture(conn, "R", "D", "communications", "items", "둘째 회의")
+    save_capture(
+        conn,
+        "R",
+        "D",
+        "communications",
+        "items",
+        "2017년 3월 2일 회의",
+        confirmed={"raw": "2017년 3월 2일 회의", "date": "2017-03-02"},
+    )
+    assert save_capture(
+        conn,
+        "R",
+        "D",
+        "communications",
+        "items",
+        "  2017년 3월 2일 회의 ",
+        confirmed={"raw": "2017년 3월 2일 회의", "date": "2017-03-02"},
+    )
+    save_capture(
+        conn, "R", "D", "communications", "items", "둘째 회의", confirmed={"raw": "둘째 회의"}
+    )
     from dart_parser.gold.capture_store import remove_list_item
 
     assert remove_list_item(conn, "R", "D", "communications", "items", 0)
@@ -131,8 +171,8 @@ def test_communication_rounds_skip_duplicates_and_renumber(tmp_path) -> None:
 
 def test_overwrite_and_clear_keep_history(tmp_path) -> None:
     conn = _conn(tmp_path)
-    save_capture(conn, "R", "D", "company_name", "value", "가나")
-    save_capture(conn, "R", "D", "company_name", "value", "다라")
+    save_capture(conn, "R", "D", "company_name", "value", "가나", confirmed="가나")
+    save_capture(conn, "R", "D", "company_name", "value", "다라", confirmed="다라")
     clear_capture(conn, "R", "D", "company_name", "value")
     history = conn.execute(
         "SELECT value, action FROM gold_capture_history ORDER BY rowid"
@@ -170,8 +210,10 @@ def _sample(
 def test_second_pass_does_not_change_first_pass_or_sample_status(tmp_path) -> None:
     conn = _conn(tmp_path)
     _sample(conn)
-    assert save_capture(conn, "R", "D", "company_name", "value", "1차값")
-    assert save_capture(conn, "R", "D", "company_name", "value", "2차값", capture_pass=2)
+    assert save_capture(conn, "R", "D", "company_name", "value", "1차값", confirmed="1차값")
+    assert save_capture(
+        conn, "R", "D", "company_name", "value", "2차값", confirmed="2차값", capture_pass=2
+    )
     assert set_unit(conn, "R", "D", "bs", 1_000, capture_pass=2)
     first = load_captures(conn, "R", "D")[("company_name", "value")]
     second = load_captures(conn, "R", "D", capture_pass=2)[("company_name", "value")]
@@ -191,8 +233,12 @@ def test_second_pass_does_not_change_first_pass_or_sample_status(tmp_path) -> No
 def test_second_pass_keeps_history_and_rolls_back(tmp_path) -> None:
     conn = _conn(tmp_path)
     _sample(conn)
-    save_capture(conn, "R", "D", "company_name", "value", "가나", capture_pass=2)
-    save_capture(conn, "R", "D", "company_name", "value", "다라", capture_pass=2)
+    save_capture(
+        conn, "R", "D", "company_name", "value", "가나", confirmed="가나", capture_pass=2
+    )
+    save_capture(
+        conn, "R", "D", "company_name", "value", "다라", confirmed="다라", capture_pass=2
+    )
     conn.execute(
         """
         CREATE TRIGGER boom BEFORE UPDATE ON gold_recaptures
@@ -202,7 +248,9 @@ def test_second_pass_keeps_history_and_rolls_back(tmp_path) -> None:
         """
     )
     with pytest.raises(sqlite3.Error):
-        save_capture(conn, "R", "D", "company_name", "value", "마바", capture_pass=2)
+        save_capture(
+            conn, "R", "D", "company_name", "value", "마바", confirmed="마바", capture_pass=2
+        )
     row = load_captures(conn, "R", "D", capture_pass=2)[("company_name", "value")]
     assert json.loads(row["value"]) == "다라"
     history = conn.execute(
@@ -216,7 +264,7 @@ def test_second_pass_keeps_history_and_rolls_back(tmp_path) -> None:
 def test_clearing_the_last_title_or_round_returns_to_before_capture(tmp_path) -> None:
     conn = _conn(tmp_path)
     _sample(conn)
-    save_capture(conn, "R", "D", "notes_toc", "value", "마지막 제목")
+    save_capture(conn, "R", "D", "notes_toc", "value", "마지막 제목", confirmed="마지막 제목")
     from dart_parser.gold.capture_store import remove_list_item
 
     assert remove_list_item(conn, "R", "D", "notes_toc", "value", 0)
@@ -243,7 +291,16 @@ def test_clearing_the_last_title_or_round_returns_to_before_capture(tmp_path) ->
         """
     )
     conn.commit()
-    save_capture(conn, "R", "D", "communications", "items", "마지막 회차", capture_pass=2)
+    save_capture(
+        conn,
+        "R",
+        "D",
+        "communications",
+        "items",
+        "마지막 회차",
+        confirmed={"raw": "마지막 회차"},
+        capture_pass=2,
+    )
     conn.execute(
         """
         UPDATE gold_recapture_status
@@ -274,7 +331,7 @@ def test_clearing_the_last_title_or_round_returns_to_before_capture(tmp_path) ->
 
 def test_failed_overwrite_rolls_back_capture_and_history(tmp_path) -> None:
     conn = _conn(tmp_path)
-    save_capture(conn, "R", "D", "company_name", "value", "가나")
+    save_capture(conn, "R", "D", "company_name", "value", "가나", confirmed="가나")
     conn.execute(
         """
         CREATE TRIGGER boom BEFORE UPDATE ON gold_captures
@@ -284,7 +341,32 @@ def test_failed_overwrite_rolls_back_capture_and_history(tmp_path) -> None:
         """
     )
     with pytest.raises(sqlite3.Error):
-        save_capture(conn, "R", "D", "company_name", "value", "다라")
+        save_capture(conn, "R", "D", "company_name", "value", "다라", confirmed="다라")
     row = load_captures(conn, "R", "D")[("company_name", "value")]
     assert json.loads(row["value"]) == "가나"
     assert conn.execute("SELECT count(*) FROM gold_capture_history").fetchone()[0] == 0
+
+
+def test_confirmed_value_overrides_the_drag_and_keeps_the_evidence(tmp_path) -> None:
+    conn = _conn(tmp_path)
+    assert save_capture(
+        conn, "R", "D", "company_name", "value", "주식회사 한일진공 외", confirmed="한일진공"
+    )
+    row = load_captures(conn, "R", "D")[("company_name", "value")]
+    assert json.loads(row["value"]) == "한일진공"
+    assert row["evidence"] == "주식회사 한일진공 외"
+    assert save_capture(
+        conn, "R", "D", "opinion", "value", "한정의견을 표명합니다", confirmed="적정"
+    )
+    opinion = load_captures(conn, "R", "D")[("opinion", "value")]
+    assert json.loads(opinion["value"]) == "적정"
+    assert opinion["evidence"] == "한정의견을 표명합니다"
+    set_unit(conn, "R", "D", "bs", 1)
+    assert save_capture(
+        conn, "R", "D", "accounts", "total_asset@current", "19,506", confirmed=20000
+    )
+    amount = json.loads(load_captures(conn, "R", "D")[("accounts", "total_asset@current")]["value"])
+    assert amount["raw"] == "19,506"
+    assert amount["value"] == 20000.0
+    assert amount["value_won"] == 20000.0
+    assert not save_capture(conn, "R", "D", "company_name", "value", "   ", confirmed="빈칸")

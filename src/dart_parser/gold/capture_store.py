@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from dart_parser.gold.capture import SCALES, known_subject, money_group, parse_click
+from dart_parser.gold.capture import SCALES, confirm_value, known_subject, money_group
 from dart_parser.normalizer.cleaner import normalize_text
 
 _ABSENT = frozenset({"not_applicable", "not_in_regime"})
@@ -45,6 +45,7 @@ def save_capture(
     subject: str,
     text: str,
     *,
+    confirmed: Any,
     capture_pass: int = 1,
 ) -> bool:
     rows_table, _units_table, history_table = _tables(capture_pass)
@@ -53,10 +54,11 @@ def save_capture(
     if group is not None:
         scale = load_units(conn, rcept_no, dcm_no, capture_pass=capture_pass).get(group)
     engagement = _engagement(conn, rcept_no, dcm_no, capture_pass)
-    parsed = parse_click(
+    parsed = confirm_value(
         bundle,
         subject,
         text,
+        confirmed,
         unit_scale=scale,
         icfr_engagement=engagement,
     )

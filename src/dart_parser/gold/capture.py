@@ -54,11 +54,13 @@ _COVER = (
     ("company_name", "회사명"),
     ("document_title", "문서 제목"),
     ("fiscal_term", "기수"),
+    ("current_period", "보고기간"),
     ("auditor", "감사인"),
+)
+_OPINION = (
     ("opinion", "감사의견"),
     ("gaap", "회계기준"),
     ("audit_report_date", "감사보고서일"),
-    ("current_period", "보고기간"),
 )
 
 
@@ -89,6 +91,8 @@ def capture_rows() -> tuple[CaptureRow, ...]:
     rows: list[CaptureRow] = [
         CaptureRow("표지", bundle, "value", label) for bundle, label in _COVER
     ]
+    rows.extend(CaptureRow("의견", bundle, "value", label) for bundle, label in _OPINION)
+    rows.append(CaptureRow("의견", "going_concern", "value", "계속기업"))
     for account in BS_ACCOUNTS:
         for period, when in (("current", "당기"), ("prior", "전기")):
             rows.append(
@@ -109,6 +113,7 @@ def capture_rows() -> tuple[CaptureRow, ...]:
                     f"{_ACCOUNT_LABELS[account]} · {when}",
                 )
             )
+    rows.append(CaptureRow("주석 목차", "notes_toc", "value", "주석 목차"))
     for role, role_names in HOUR_ROLE_ALIASES.items():
         for metric, metric_names in HOUR_METRIC_ALIASES.items():
             for period, when in (("current", "당기"), ("prior", "전기")):
@@ -126,12 +131,112 @@ def capture_rows() -> tuple[CaptureRow, ...]:
     )
     rows.append(CaptureRow("커뮤니케이션", "communications", "has_audit_committee", "감사위원회"))
     rows.append(CaptureRow("커뮤니케이션", "communications", "items", "회차"))
-    rows.append(CaptureRow("나머지", "icfr", "engagement", "내부회계 업무"))
-    rows.append(CaptureRow("나머지", "icfr", "opinion", "내부회계 의견"))
-    rows.append(CaptureRow("나머지", "going_concern", "value", "계속기업"))
-    rows.append(CaptureRow("나머지", "subsidiary", "value", "종속기업 수"))
-    rows.append(CaptureRow("나머지", "notes_toc", "value", "주석 목차"))
+    rows.append(CaptureRow("내부회계", "icfr", "engagement", "인증수준"))
+    rows.append(CaptureRow("내부회계", "icfr", "opinion", "내부회계 의견"))
+    rows.append(CaptureRow("종속기업", "subsidiary", "value", "종속기업 수"))
     return tuple(rows)
+
+
+def section_jumps() -> dict[str, tuple[str, ...]]:
+    return {
+        "표지": (),
+        "의견": ("감사의견",),
+        "재무상태표": ("재무상태표", "대차대조표"),
+        "손익계산서": ("손익계산서", "포괄손익계산서"),
+        "주석 목차": ("주석",),
+        "감사시간": ("감사시간",),
+        "실시내용": ("감사실시내용",),
+        "커뮤니케이션": ("커뮤니케이션",),
+        "내부회계": ("내부회계",),
+        "종속기업": ("종속기업",),
+    }
+
+
+@dataclass(frozen=True)
+class FieldControl:
+    kind: str
+    options: tuple[tuple[str, str], ...] = ()
+    blocked: str = ""
+
+
+def field_control(
+    bundle: str,
+    subject: str,
+    *,
+    icfr_engagement: str | None = None,
+) -> FieldControl:
+    if not known_subject(bundle, subject):
+        return FieldControl("text")
+    if bundle == "document_title":
+        return FieldControl(
+            "enum",
+            (("감사보고서", "감사보고서"), ("연결감사보고서", "연결감사보고서")),
+        )
+    if bundle == "opinion":
+        return FieldControl(
+            "enum",
+            tuple((item, item) for item in ("적정", "한정", "부적정", "거절")),
+        )
+    if bundle == "gaap":
+        return FieldControl("enum", (("K-IFRS", "K-IFRS"), ("K-GAAP", "K-GAAP")))
+    if bundle == "icfr" and subject == "engagement":
+        return FieldControl("enum", (("audit", "감사"), ("review", "검토")))
+    if bundle == "icfr" and subject == "opinion":
+        if icfr_engagement == "audit":
+            options = ("적정", "부적정", "거절")
+        elif icfr_engagement == "review":
+            options = ("적정", "한정", "거절", "중요한 취약점")
+        else:
+            return FieldControl("enum", blocked="인증수준을 먼저 저장하세요")
+        return FieldControl("enum", tuple((item, item) for item in options))
+    if bundle == "going_concern":
+        return FieldControl("enum", (("1", "불확실성 있음"), ("0", "불확실성 없음")))
+    if bundle == "communications" and subject == "has_audit_committee":
+        return FieldControl("enum", (("true", "있음"), ("false", "없음")))
+    if bundle == "audit_report_date":
+        return FieldControl("date")
+    if bundle == "current_period":
+        return FieldControl("period")
+    if money_group(bundle, subject) is not None:
+        return FieldControl("amount")
+    if bundle in {"hours", "subsidiary"}:
+        return FieldControl("number")
+    if bundle == "notes_toc":
+        return FieldControl("note")
+    if bundle == "communications" and subject == "items":
+        return FieldControl("round")
+    return FieldControl("text")
+
+
+def confirm_value(
+    bundle: str,
+    subject: str,
+    evidence: str,
+    confirmed: Any,
+    *,
+    unit_scale: int | None = None,
+    icfr_engagement: str | None = None,
+) -> Any | None:
+    if not known_subject(bundle, subject):
+        return None
+    if not normalize_text(evidence):
+        return None
+    control = field_control(bundle, subject, icfr_engagement=icfr_engagement)
+    if control.kind == "enum":
+        return _confirm_enum(bundle, subject, control, confirmed)
+    if control.kind in {"text", "note"}:
+        return _confirmed_text(confirmed)
+    if control.kind == "date":
+        return _iso_date(confirmed)
+    if control.kind == "period":
+        return _confirm_period(confirmed)
+    if control.kind == "amount":
+        return _confirm_amount(evidence, confirmed, unit_scale)
+    if control.kind == "number":
+        return _finite_number(confirmed)
+    if control.kind == "round":
+        return _confirm_round(confirmed)
+    return None
 
 
 def parse_click(
@@ -252,3 +357,103 @@ def _one(found: list[str]) -> str | None:
     if len(found) != 1:
         return None
     return found[0]
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number
+
+
+def _iso_date(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.date.fromisoformat(value).isoformat()
+    except ValueError:
+        return None
+    if parsed != value:
+        return None
+    return parsed
+
+
+def _confirm_enum(
+    bundle: str,
+    subject: str,
+    control: FieldControl,
+    confirmed: Any,
+) -> Any | None:
+    if control.blocked:
+        return None
+    if bundle == "going_concern":
+        if type(confirmed) is int and confirmed in {0, 1}:
+            return confirmed
+        return None
+    if bundle == "communications" and subject == "has_audit_committee":
+        if confirmed is True or confirmed is False:
+            return confirmed
+        return None
+    allowed = {value for value, _label in control.options}
+    if isinstance(confirmed, str) and confirmed in allowed:
+        return confirmed
+    return None
+
+
+def _confirmed_text(confirmed: Any) -> str | None:
+    if not isinstance(confirmed, str):
+        return None
+    cleaned = normalize_text(confirmed)
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _confirm_period(confirmed: Any) -> dict[str, str] | None:
+    if not isinstance(confirmed, dict):
+        return None
+    start = _iso_date(confirmed.get("start"))
+    end = _iso_date(confirmed.get("end"))
+    if start is None or end is None:
+        return None
+    return {"start": start, "end": end}
+
+
+def _confirm_amount(
+    evidence: str,
+    confirmed: Any,
+    unit_scale: int | None,
+) -> dict[str, Any] | None:
+    if unit_scale not in SCALES:
+        return None
+    number = _finite_number(confirmed)
+    if number is None:
+        return None
+    return {
+        "raw": evidence,
+        "value": number,
+        "unit_scale": unit_scale,
+        "value_won": number * unit_scale,
+    }
+
+
+def _confirm_round(confirmed: Any) -> dict[str, str] | None:
+    if not isinstance(confirmed, dict):
+        return None
+    raw = confirmed.get("raw")
+    if not isinstance(raw, str):
+        return None
+    cleaned = normalize_text(raw)
+    if not cleaned:
+        return None
+    item = {"raw": cleaned}
+    date = confirmed.get("date")
+    if "date" not in confirmed or date in {"", None}:
+        return item
+    parsed = _iso_date(date)
+    if parsed is None:
+        return None
+    item["date"] = parsed
+    return item

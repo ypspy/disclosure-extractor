@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
-from dart_parser.gold.capture import CaptureRow, money_group
+from dart_parser.gold.capture import CaptureRow, money_group, section_jumps
 from dart_parser.gold.capture_html import prepare_disclosure_html
 
 _SCALES: tuple[tuple[int, str], ...] = (
@@ -51,6 +51,7 @@ def render_capture_page(
         raise ValueError("base는 doc 또는 recapture입니다.")
     title = _title(rcept_no, dcm_no, company, report, filed)
     capture_url = _path(rcept_no, dcm_no, "capture", base)
+    preview_url = _path(rcept_no, dcm_no, "preview", base)
     cleaned = prepare_disclosure_html(filing_html)
     row_column = _rows(
         rows,
@@ -88,19 +89,35 @@ def render_capture_page(
         '<!DOCTYPE html><html><head><meta charset="utf-8">'
         f"<title>{html.escape(title)}</title>"
         "<style>"
-        "body{margin:0;font-family:sans-serif}"
-        "header{padding:0.5rem 1rem}"
-        ".layout{display:grid;grid-template-columns:1fr 24rem;height:calc(100vh - 5rem)}"
-        "#filing,.rows{overflow:auto;height:100%}"
-        "form{border-top:1px solid #ccc;padding:0.4rem}"
+        ":root{--desk:#e4dccb;--ink:#1c1915;--paper:#fbf7ef;--fields:#efe8d8;"
+        "--rail:#d9d0bf;--mark:#e7b008;--bar:#243028;--bar-text:#f4efe4}"
+        "body{margin:0;background:var(--desk);color:var(--ink);font-family:Batang,serif}"
+        '#sections,.rows,button,select,input{font-family:"Malgun Gothic",sans-serif}'
+        "#sections{display:flex;gap:0.4rem;padding:0.4rem 1rem;background:var(--rail)}"
+        ".layout{display:grid;grid-template-columns:1fr 24rem;height:calc(100vh - 8rem)}"
+        "#filing{background:var(--paper);overflow:auto;height:100%}"
+        ".rows{background:var(--fields);overflow:auto;height:100%}"
+        "section:not([data-active]){display:none}"
+        "#confirm{display:flex;gap:0.5rem;align-items:center;padding:0.5rem 1rem;"
+        "background:var(--bar);color:var(--bar-text)}"
+        "#confirm[hidden]{display:none}"
+        "header{background:var(--ink);color:var(--bar-text)}"
         "</style></head><body>"
         f"{header}"
+        f"{_sections_nav()}"
+        '<div id="confirm" hidden>'
+        '<p id="confirm-evidence"></p>'
+        '<div id="confirm-control"></div>'
+        '<p id="confirm-reason"></p>'
+        '<button type="button" id="confirm-save">저장</button>'
+        '<button type="button" id="confirm-cancel">취소</button>'
+        "</div>"
         f"{_toc_nav(toc)}"
         '<div class="layout">'
         '<div id="filing"></div>'
         f'<div class="rows">{row_column}</div>'
         "</div>"
-        f"{_data(capture_url, cleaned)}"
+        f"{_data(capture_url, preview_url, cleaned)}"
         '<script src="/static/capture.js"></script>'
         "</body></html>"
     )
@@ -128,12 +145,15 @@ def _rows(
 ) -> str:
     parts: list[str] = []
     current = ""
+    first = True
     for row in rows:
         if row.group != current:
             if current:
                 parts.append("</section>")
             current = row.group
-            parts.append("<section>")
+            active = ' data-active="1"' if first else ""
+            first = False
+            parts.append(f'<section data-section="{html.escape(row.group)}"{active}>')
             parts.append(f"<h2>{html.escape(row.group)}</h2>")
             unit_group = _UNIT_GROUP.get(row.group)
             if unit_group is not None:
@@ -348,6 +368,17 @@ def _next_link(period: str, base: str) -> str:
     return f'<p><a href="{href}?period={quote(period)}">다음 문서</a></p>'
 
 
+def _sections_nav() -> str:
+    buttons: list[str] = []
+    for index, name in enumerate(section_jumps()):
+        pressed = ' aria-pressed="true"' if index == 0 else ' aria-pressed="false"'
+        buttons.append(
+            f'<button type="button" data-section="{html.escape(name)}"{pressed}>'
+            f"{html.escape(name)}</button>"
+        )
+    return f'<nav id="sections">{"".join(buttons)}</nav>'
+
+
 def _toc_nav(toc: Sequence[tuple[str, str]]) -> str:
     if not toc:
         return ""
@@ -377,6 +408,13 @@ def _path(rcept_no: str, dcm_no: str, action: str, base: str = "doc") -> str:
     return f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}/{action}"
 
 
-def _data(capture_url: str, filing_html: str) -> str:
-    payload = html_json({"captureUrl": capture_url, "filingHtml": filing_html})
+def _data(capture_url: str, preview_url: str, filing_html: str) -> str:
+    payload = html_json(
+        {
+            "captureUrl": capture_url,
+            "previewUrl": preview_url,
+            "filingHtml": filing_html,
+            "sections": {name: list(phrases) for name, phrases in section_jumps().items()},
+        }
+    )
     return f'<script id="capture-data" type="application/json">{payload}</script>'

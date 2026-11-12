@@ -386,7 +386,7 @@ def test_second_pass_labels_come_only_from_finished_recaptures(tmp_path) -> None
     conn.commit()
     second = list(capture_labels(conn, capture_pass=2))
     assert [item.gold_value for item in second] == ["적정"]
-    assert save_capture(conn, "A", "D", "company_name", "value", "숨은1차")
+    assert save_capture(conn, "A", "D", "company_name", "value", "숨은1차", confirmed="숨은1차")
     assert "숨은1차" not in [item.gold_value for item in capture_labels(conn, capture_pass=2)]
 
 
