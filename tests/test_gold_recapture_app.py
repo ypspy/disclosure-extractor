@@ -15,7 +15,14 @@ import pytest
 
 from dart_parser.gold.capture import capture_rows
 from dart_parser.gold.scoring import wilson
-from test_gold_capture_app import _build, _post, _request
+from test_gold_capture_app import (
+    _build,
+    _capture_json_data,
+    _post,
+    _post_json,
+    _request,
+    _request_host,
+)
 
 
 def _raw_post(
@@ -838,6 +845,76 @@ def test_finished_recapture_locks_the_second_pass_preview(tmp_path: Path) -> Non
     app.close()
 
 
+def test_recapture_export_omits_the_first_pass_and_does_not_write(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    conn.execute(
+        """
+        INSERT INTO gold_captures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'company_name', 'value', 'found', ?, 'PASS1-EVIDENCE-ZZ', 't'
+        )
+        """,
+        (json.dumps("PASS1-VALUE-ZZ", ensure_ascii=False),),
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_recaptures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'auditor', 'value', 'found', ?, '2차감사인', 't'
+        )
+        """,
+        (json.dumps("2차감사인", ensure_ascii=False),),
+    )
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES)
+    status, headers, body = _request(app, "GET", "/recapture/R100/D100/export")
+    text = body.decode()
+    assert status == "200 OK"
+    assert headers["Content-Type"].startswith("application/json")
+    assert "PASS1-VALUE-ZZ" not in text
+    assert "PASS1-EVIDENCE-ZZ" not in text
+    rows = json.loads(body)
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "R100/D100"
+    assert rows[0]["field_key"] == "auditor/value"
+    assert rows[0]["extracted_value"] == "2차감사인"
+    assert rows[0]["raw_text"] == "2차감사인"
+    assert rows[0]["locator"] is None
+    assert rows[0]["selection_method"] is None
+    assert _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES) == before
+    locked, locked_headers, locked_body = _request(app, "GET", "/doc/R100/D100/export")
+    locked_text = locked_body.decode()
+    assert locked.startswith("409")
+    assert locked_text == "재입수 중"
+    assert "PASS1-VALUE-ZZ" not in locked_text
+    assert "PASS1-EVIDENCE-ZZ" not in locked_text
+    assert "default-src 'none'" in locked_headers["Content-Security-Policy"]
+    page_status, page_headers, page = _request(app, "GET", "/recapture/R100/D100")
+    shown = page.decode()
+    assert page_status == "200 OK"
+    assert 'href="/recapture/R100/D100/export"' in shown
+    assert "PASS1-VALUE-ZZ" not in shown
+    assert "PASS1-EVIDENCE-ZZ" not in shown
+    assert "onclick=" not in shown
+    assert "function (" not in shown
+    assert "default-src 'none'" in page_headers["Content-Security-Policy"]
+    for host in ("evil.test", "evil.test:80"):
+        foreign, _foreign_headers, foreign_body = _request_host(
+            app, "/recapture/R100/D100/export", host
+        )
+        foreign_text = foreign_body.decode()
+        assert foreign.startswith("403"), host
+        assert "2차감사인" not in foreign_text
+        assert "PASS1-VALUE-ZZ" not in foreign_text
+        assert "PASS1-EVIDENCE-ZZ" not in foreign_text
+    app.close()
+
+
 def test_recapture_page_points_preview_at_the_second_pass(tmp_path: Path) -> None:
     app = _build(tmp_path)
     conn = sqlite3.connect(tmp_path / "gold.db")
@@ -850,4 +927,67 @@ def test_recapture_page_points_preview_at_the_second_pass(tmp_path: Path) -> Non
     raw = page.split('id="capture-data"', 1)[1]
     raw = raw.split(">", 1)[1].split("</script>", 1)[0]
     assert json.loads(raw)["previewUrl"] == "/recapture/R100/D100/preview"
+    app.close()
+
+
+def test_recapture_capture_data_uses_a_different_pass(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    first_status, _headers, first_body = _request(app, "GET", "/doc/R100/D100")
+    assert first_status == "200 OK"
+    first = _capture_json_data(first_body.decode())
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    _open_status(conn)
+    conn.commit()
+    conn.close()
+    second_status, _headers, second_body = _request(app, "GET", "/recapture/R100/D100")
+    assert second_status == "200 OK"
+    second = _capture_json_data(second_body.decode())
+    assert first["pass"] == 1
+    assert first["base"] == "doc"
+    assert second["pass"] == 2
+    assert second["base"] == "recapture"
+    assert first["pass"] != second["pass"]
+    app.close()
+
+
+def test_json_capture_after_recapture_is_done_stays_locked(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    _open_status(conn)
+    conn.execute(
+        """
+        UPDATE gold_recapture_status
+        SET status = 'done', finished_at = '2026-07-02T00:00:00+00:00'
+        WHERE rcept_no = 'R100'
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO gold_recaptures (
+            rcept_no, dcm_no, bundle, subject, status, value, evidence, updated_at
+        ) VALUES (
+            'R100', 'D100', 'auditor', 'value', 'found', ?, '2차감사인', 't'
+        )
+        """,
+        (json.dumps("2차감사인", ensure_ascii=False),),
+    )
+    conn.commit()
+    conn.close()
+    before = _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES)
+    status, headers, body = _post_json(
+        app,
+        "/recapture/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "JSON-LOCK-ZZ",
+            "confirmed": json.dumps("JSON-LOCK-ZZ"),
+        },
+    )
+    text = body.decode()
+    assert status.startswith("409")
+    assert text == "재입수가 끝났습니다"
+    assert "JSON-LOCK-ZZ" not in text
+    assert "application/json" not in headers.get("Content-Type", "")
+    assert _stored(tmp_path / "gold.db", _FIRST_PASS_TABLES + _RECAPTURE_TABLES) == before
     app.close()

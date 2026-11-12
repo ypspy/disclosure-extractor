@@ -136,6 +136,24 @@ def _post(
     return str(captured["status"]), dict(captured["headers"]), body
 
 
+def _gold_tables(tmp_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    names = (
+        "gold_captures",
+        "gold_capture_units",
+        "gold_capture_history",
+        "gold_recaptures",
+        "gold_recapture_units",
+        "gold_recapture_history",
+    )
+    snapshot = {
+        name: conn.execute(f"SELECT * FROM {name}").fetchall()
+        for name in names
+    }
+    conn.close()
+    return snapshot
+
+
 def _capture(tmp_path: Path, bundle: str, subject: str) -> sqlite3.Row | None:
     conn = sqlite3.connect(tmp_path / "gold.db")
     conn.row_factory = sqlite3.Row
@@ -914,4 +932,497 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     assert "data-scroll" in toc
     assert "scrollIntoView" in toc
     assert toc.index("preventDefault()") < toc.index("getElementById")
+    app.close()
+
+
+def _request_host(
+    app: ReviewApplication,
+    path: str,
+    host: str,
+    port: str = "80",
+) -> tuple[str, dict[str, str], bytes]:
+    environ = {"PATH_INFO": path, "QUERY_STRING": "", "REQUEST_METHOD": "GET"}
+    setup_testing_defaults(environ)
+    environ["HTTP_HOST"] = host
+    environ["SERVER_PORT"] = port
+    environ["wsgi.input"] = io.BytesIO()
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]], exc_info=None) -> None:
+        del exc_info
+        captured["status"] = status
+        captured["headers"] = {key: value for key, value in headers}
+
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), dict(captured["headers"]), body
+
+
+def _post_json(
+    app: ReviewApplication,
+    path: str,
+    fields: dict[str, str],
+) -> tuple[str, dict[str, str], bytes]:
+    document = "/" + "/".join(path.strip("/").split("/")[:3])
+    _status, _headers, page = _request(app, "GET", document)
+    match = re.search(r'name="token" value="([^"]*)"', page.decode())
+    assert match is not None
+    payload = dict(fields)
+    payload["token"] = match.group(1)
+    raw = urlencode(payload).encode("utf-8")
+    environ = {
+        "PATH_INFO": path,
+        "QUERY_STRING": "",
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        "CONTENT_LENGTH": str(len(raw)),
+        "HTTP_HOST": "localhost:80",
+        "SERVER_PORT": "80",
+        "HTTP_ACCEPT": "application/json",
+    }
+    setup_testing_defaults(environ)
+    environ["REQUEST_METHOD"] = "POST"
+    environ["CONTENT_TYPE"] = "application/x-www-form-urlencoded"
+    environ["CONTENT_LENGTH"] = str(len(raw))
+    environ["HTTP_HOST"] = "localhost:80"
+    environ["SERVER_PORT"] = "80"
+    environ["HTTP_ACCEPT"] = "application/json"
+    environ["wsgi.input"] = io.BytesIO(raw)
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]], exc_info=None) -> None:
+        del exc_info
+        captured["status"] = status
+        captured["headers"] = {key: value for key, value in headers}
+
+    body = b"".join(app(environ, start_response))
+    return str(captured["status"]), dict(captured["headers"]), body
+
+
+def test_desk_splits_the_filing_and_keeps_host_styles_outside(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    _status, headers, body = _request(app, "GET", "/doc/R100/D100")
+    page = body.decode()
+    compact = page.replace(" ", "")
+    assert "--split:60%" in compact
+    assert "position:sticky" in compact
+    assert 'id="pane-resizer"' in page
+    assert 'role="separator"' in page
+    assert 'id="export-json"' in page
+    assert 'href="/doc/R100/D100/export"' in page
+    assert "JSON Export" in page
+    assert 'id="auto-advance"' in page
+    assert 'id="field-picker"' in page
+    assert "<iframe" not in page.lower()
+    assert "onclick=" not in page
+    assert "function (" not in page
+    assert "default-src 'none'" in headers["Content-Security-Policy"]
+    filing = page.split('id="filing"', 1)[1].split("</div>", 1)[0]
+    assert "<style" not in filing
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert "gold-source" not in style
+    assert "gold-snap" not in style
+    assert 'id="doc-progress"' in page
+    script_status, _script_headers, script_body = _request(app, "GET", "/static/capture.js")
+    assert script_status == "200 OK"
+    script = script_body.decode()
+    assert "attachShadow" in script
+    assert 'root.innerHTML = "<style>' in script
+    assert "gold-source" in script
+    assert "::selection{background:#e7b008}" in script
+    assert "normalizeText" in script
+    assert 'closest("td, th, p")' in script
+    assert "isCollapsed" in script
+    assert "cell_click" in script
+    assert "text_drag" in script
+    assert "manual_edit" in script
+    assert '"Accept": "application/json"' in script
+    assert "proposalConfirmed" in script
+    assert "payload.blocked" in script
+    assert "gold-auto-advance" in script
+    assert "nextEmpty" in script
+    assert "sessionStorage.setItem(autoKey" in script
+    assert "scrollToLocator" in script
+    assert "scrollIntoView" in script
+    assert "css_selector" in script
+    assert "start_offset" in script
+    assert "end_offset" in script
+    assert "xpath" in script
+    assert "field-picker" in script
+    assert "켜진 칸이 없다" in script
+    assert "undoStack" in script
+    assert "ctrlKey" in script
+    assert "metaKey" in script
+    assert "selection_method" in script
+    assert "exportUrl" in script
+    assert "gold-split" in script
+    app.close()
+
+
+def test_export_lists_saved_rows_without_writing(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    empty_status, empty_headers, empty_body = _request(app, "GET", "/doc/R100/D100/export")
+    assert empty_status == "200 OK"
+    assert empty_headers["Content-Type"].startswith("application/json")
+    assert json.loads(empty_body) == []
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나회사",
+            "confirmed": json.dumps("가나회사"),
+        },
+    )
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    before = conn.execute(
+        "SELECT bundle, subject, status, value, evidence FROM gold_captures"
+    ).fetchall()
+    conn.close()
+    status, headers, body = _request(app, "GET", "/doc/R100/D100/export")
+    assert status == "200 OK"
+    assert headers["Content-Type"].startswith("application/json")
+    assert "attachment;" in headers["Content-Disposition"]
+    rows = json.loads(body)
+    assert len(rows) == 1
+    assert rows[0]["doc_id"] == "R100/D100"
+    assert rows[0]["field_key"] == "company_name/value"
+    assert rows[0]["extracted_value"] == "가나회사"
+    assert rows[0]["raw_text"] == "가나회사"
+    assert rows[0]["locator"] is None
+    assert rows[0]["selection_method"] is None
+    conn = sqlite3.connect(tmp_path / "gold.db")
+    after = conn.execute(
+        "SELECT bundle, subject, status, value, evidence FROM gold_captures"
+    ).fetchall()
+    conn.close()
+    assert after == before
+    foreign, _headers, foreign_body = _request_host(app, "/doc/R100/D100/export", "evil.test:80")
+    assert foreign.startswith("403")
+    assert "가나회사".encode() not in foreign_body
+    posted, _headers, _body = _request(app, "POST", "/doc/R100/D100/export")
+    assert posted.startswith("405")
+    app.close()
+
+
+def test_json_accept_saves_in_place_and_still_requires_confirmed(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, headers, body = _post_json(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": "가나회사",
+            "confirmed": json.dumps("가나회사"),
+        },
+    )
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    assert "Location" not in headers
+    payload = json.loads(body)
+    assert payload["ok"] is True
+    assert payload["shown"] == "가나회사"
+    assert payload["replay"] == "가나회사"
+    assert payload["cleared"] is False
+    assert payload["recorded"] == 1
+    saved = _capture(tmp_path, "company_name", "value")
+    assert saved is not None
+    assert json.loads(saved["value"]) == "가나회사"
+    rejected, _headers, rejected_body = _post_json(
+        app,
+        "/doc/R100/D100/capture",
+        {"bundle": "auditor", "subject": "value", "text": "삼일"},
+    )
+    assert rejected.startswith("422")
+    assert json.loads(rejected_body)["ok"] is False
+    assert _capture(tmp_path, "auditor", "value") is None
+    assert json.loads(_capture(tmp_path, "company_name", "value")["value"]) == "가나회사"
+    app.close()
+
+
+def _capture_json_data(page: str) -> dict[str, object]:
+    raw = page.split('id="capture-data"', 1)[1]
+    raw = raw.split(">", 1)[1].split("</script>", 1)[0]
+    loaded = json.loads(raw)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _js_function(script: str, name: str) -> str:
+    marker = f"function {name}"
+    start = script.index(marker)
+    rest = script[start + len(marker) :]
+    nxt = rest.find("\n  function ")
+    return rest if nxt < 0 else rest[:nxt]
+
+
+def test_document_capture_data_names_pass_one(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    assert status == "200 OK"
+    data = _capture_json_data(body.decode())
+    assert data["pass"] == 1
+    assert data["base"] == "doc"
+    app.close()
+
+
+def test_capture_script_scopes_storage_and_restores_lists_after_ok(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    assert 'var mapKey = "gold-field-map:" + (data.docId || "");' not in script
+    assert 'var undoKey = "gold-undo:" + (data.docId || "");' not in script
+    map_line = next(line for line in script.splitlines() if "gold-field-map:" in line)
+    undo_line = next(line for line in script.splitlines() if "gold-undo:" in line)
+    assert "data.docId" in map_line
+    assert "data.pass" in map_line or "data.base" in map_line
+    assert "data.docId" in undo_line
+    assert "data.pass" in undo_line or "data.base" in undo_line
+    undo = _js_function(script, "undoLast")
+    assert "undoStack.pop()" not in undo
+    assert "sessionStorage.setItem(undoKey" not in undo
+    assert "undoBusy" in undo
+    assert "commitUndo()" in undo
+    assert undo.index("if (!ok)") < undo.index("commitUndo()")
+    commit = _js_function(script, "commitUndo")
+    assert "undoStack.pop()" in commit
+    assert "undoKey" in commit
+    restore = _js_function(script, "restoreList")
+    assert "postRemove" in restore
+    assert "current.length - 1" in restore
+    assert "replayList" in restore
+    replay = _js_function(script, "replayLines")
+    assert "postCapture" in replay
+    assert "lineConfirmed" in replay
+    assert "postRemove(form, current.length - 1" not in replay
+    app.close()
+
+
+def test_portless_loopback_host_requires_server_port_80(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    saved = "호스트분리값"
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": saved,
+            "confirmed": json.dumps(saved),
+        },
+    )
+    for host in ("127.0.0.1", "localhost", "127.0.0.1:80", "localhost:80"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "80")
+        assert status == "200 OK", host
+        assert saved.encode() in body
+    for host in ("127.0.0.1", "localhost"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "8000")
+        assert status.startswith("403"), host
+        assert body == "요청을 거절했습니다.".encode()
+        assert saved.encode() not in body
+    for host in ("evil.test", "evil.test:80"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "80")
+        assert status.startswith("403"), host
+        assert saved.encode() not in body
+    empty, _headers, empty_body = _request_host(app, "/doc/R100/D100/export", "127.0.0.1", "")
+    assert empty.startswith("403")
+    assert empty_body == "요청을 거절했습니다.".encode()
+    assert saved.encode() not in empty_body
+    bare_local, _headers, bare_body = _request_host(app, "/doc/R100/D100/export", "localhost", "")
+    assert bare_local.startswith("403")
+    assert saved.encode() not in bare_body
+    app.close()
+
+
+def test_xpath_of_does_not_prefix_an_absolute_id_step(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    xpath = _js_function(body.decode(), "xpathOf")
+    assert '//*[@id="' in xpath
+    guard = re.search(
+        r'if\s*\(\s*parts\.length\s*&&\s*parts\[0\]\.charAt\(0\)\s*===\s*"/"\s*\)\s*'
+        r'return\s+parts\.join\("/"\);',
+        xpath,
+    )
+    assert guard is not None
+    prefix = xpath.find('return "/" + parts.join("/")')
+    assert prefix == -1 or guard.start() < prefix
+    app.close()
+
+
+_TEXT_INPUT_TYPES = (
+    "text",
+    "search",
+    "number",
+    "password",
+    "email",
+    "url",
+    "tel",
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week",
+)
+
+
+def test_undo_ignores_text_fields_and_still_runs_on_radios(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    handler = script.split('addEventListener("keydown"', 1)[1].split(
+        'addEventListener("submit"', 1
+    )[0]
+    assert "shiftKey" in handler
+    assert "editingText(" in handler
+    assert handler.index("editingText(") < handler.index("undoLast()")
+    editing = _js_function(script, "editingText")
+    for kind in _TEXT_INPUT_TYPES:
+        assert f'"{kind}"' in editing
+    assert "TEXTAREA" in editing
+    assert "SELECT" in editing
+    assert "isContentEditable" in editing
+    assert '|| "text"' in editing
+    for kind in ("radio", "checkbox", "button", "submit"):
+        assert f'"{kind}"' not in editing
+    early = handler.split("undoLast()", 1)[0]
+    assert 'tag === "INPUT"' not in early
+    for kind in ("radio", "checkbox", "button", "submit"):
+        assert f'"{kind}"' not in early
+    app.close()
+
+
+def test_preview_amount_without_a_unit_explains_and_does_not_write(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    before = _gold_tables(tmp_path)
+    status, headers, body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "total_asset@current", "text": "19,506"},
+    )
+    assert status.startswith("200")
+    assert headers["Content-Type"].startswith("application/json")
+    payload = json.loads(body)
+    assert payload["proposal"] is None
+    assert payload["kind"] == "amount"
+    assert payload["blocked"] == "단위를 먼저 선택하세요"
+    income, _headers, income_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "revenue@current", "text": "19,506"},
+    )
+    assert income.startswith("200")
+    income_payload = json.loads(income_body)
+    assert income_payload["proposal"] is None
+    assert income_payload["blocked"] == "단위를 먼저 선택하세요"
+    plain, _headers, plain_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "company_name", "subject": "value", "text": "가나회사"},
+    )
+    assert plain.startswith("200")
+    plain_payload = json.loads(plain_body)
+    assert plain_payload["proposal"] == "가나회사"
+    assert "단위를 먼저" not in plain_payload["blocked"]
+    assert _gold_tables(tmp_path) == before
+    _post(app, "/doc/R100/D100/unit", {"unit_group": "bs", "unit_scale": "1"})
+    ready, _headers, ready_body = _post(
+        app,
+        "/doc/R100/D100/preview",
+        {"bundle": "accounts", "subject": "total_asset@current", "text": "19,506"},
+    )
+    assert ready.startswith("200")
+    ready_payload = json.loads(ready_body)
+    assert ready_payload["proposal"]["value"] == 19506
+    assert ready_payload["proposal"]["unit_scale"] == 1
+    assert "단위를 먼저" not in ready_payload["blocked"]
+    app.close()
+
+
+def test_confirm_bar_points_at_the_unit_chooser_and_skips_post(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    assert "단위를 먼저 선택하세요" in script
+    needs = _js_function(script, "amountNeedsUnit")
+    assert 'kind === "amount"' in needs
+    assert "단위를 먼저 선택하세요" in needs
+    bar = _js_function(script, "renderBar")
+    assert "showReason" in bar
+    assert "amountNeedsUnit" in bar
+    assert "pointAtUnit" in bar
+    assert bar.index("amountNeedsUnit") < bar.index("controlFor")
+    held = bar.split("amountNeedsUnit", 1)[1].split("controlFor", 1)[0]
+    assert "return" in held
+    point = _js_function(script, "pointAtUnit")
+    assert 'select[name="unit_scale"]' in point
+    assert "scrollIntoView" in point
+    assert ".focus" in point
+    save = script.split('getElementById("confirm-save")', 1)[1].split(
+        'getElementById("confirm-cancel")', 1
+    )[0]
+    assert "amountNeedsUnit" in save
+    assert save.index("amountNeedsUnit") < save.index("postCapture")
+    read = _js_function(script, "readConfirmed")
+    assert "amountNeedsUnit" in read
+    assert read.index("amountNeedsUnit") < read.index('querySelector("input")')
+    app.close()
+
+
+def test_scroll_to_locator_waits_for_a_different_field(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    row_over = script.split('document.addEventListener("pointerover"', 1)[1].split(
+        'document.addEventListener("focusin"', 1
+    )[0]
+    focus = script.split('document.addEventListener("focusin"', 1)[1].split(
+        'document.addEventListener("keydown"', 1
+    )[0]
+    assert "scrollToLocator" in row_over
+    assert "scrollToLocator" in focus
+    scroll = _js_function(script, "scrollToLocator")
+    assert "lastLocatorKey" in scroll
+    assert "fieldKey" in scroll
+    assert re.search(r"if\s*\(\s*key\s*===\s*lastLocatorKey\s*\)\s*return", scroll)
+    assert scroll.index("lastLocatorKey") < scroll.index("scrollIntoView")
+    app.close()
+
+
+def test_list_undo_replays_clear_and_middle_delete_for_both_fields(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    fields = _js_function(script, "isListField")
+    assert "notes_toc" in fields and '"value"' in fields
+    assert "communications" in fields and '"items"' in fields
+    undo = _js_function(script, "undoLast")
+    assert "undoStack.pop()" not in undo
+    assert undo.index("if (!ok)") < undo.index("commitUndo()")
+    restore = _js_function(script, "restoreList")
+    assert "undoStack.pop()" not in restore
+    assert "current.length === previous.length + 1" in restore
+    assert restore.index("postRemove") < restore.index("replayList")
+    append = restore.split("replayList", 1)[0]
+    assert "return" in append
+    replay = _js_function(script, "replayList")
+    assert "!current.length" in replay
+    assert "replayLines" in replay
+    assert 'postStatus(form, "clear"' in replay
+    empty = replay.split("!current.length", 1)[1].split('postStatus(form, "clear"', 1)[0]
+    assert "replayLines" in empty
+    clear_branch = replay.split('postStatus(form, "clear"', 1)[1]
+    assert "if (!ok)" in clear_branch
+    assert clear_branch.index("if (!ok)") < clear_branch.index("replayLines")
+    lines = _js_function(script, "replayLines")
+    assert "postCapture" in lines
+    assert "done(false" in lines
+    assert "commitUndo" not in lines
     app.close()
