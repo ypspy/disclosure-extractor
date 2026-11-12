@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote
 
-from dart_parser.gold.capture import CaptureRow, money_group, section_jumps
+from dart_parser.gold.capture import CaptureRow, capture_rows, money_group, section_jumps
 from dart_parser.gold.capture_html import prepare_disclosure_html
 
 _SCALES: tuple[tuple[int, str], ...] = (
@@ -19,6 +19,7 @@ _SCALES: tuple[tuple[int, str], ...] = (
 )
 _UNIT_NAMES = dict(_SCALES)
 _UNIT_GROUP = {"재무상태표": "bs", "손익계산서": "is"}
+_LIST_FIELDS = {("notes_toc", "value"), ("communications", "items")}
 
 
 def render_capture_page(
@@ -52,6 +53,7 @@ def render_capture_page(
     title = _title(rcept_no, dcm_no, company, report, filed)
     capture_url = _path(rcept_no, dcm_no, "capture", base)
     preview_url = _path(rcept_no, dcm_no, "preview", base)
+    export_url = _path(rcept_no, dcm_no, "export", base)
     cleaned = prepare_disclosure_html(filing_html)
     row_column = _rows(
         rows,
@@ -83,6 +85,8 @@ def render_capture_page(
         f"{_warnings(encoding_uncertain, dcm_ambiguous, cache_missing)}"
         f"{_complete_form(rcept_no, dcm_no, token, base)}"
         f"{_next_link(period, base)}"
+        f'<p><a id="export-json" href="{html.escape(export_url, quote=True)}">JSON Export</a></p>'
+        '<p><button type="button" id="auto-advance" aria-pressed="true">자동 이동 켜짐</button></p>'
         "</header>"
     )
     body = (
@@ -90,18 +94,28 @@ def render_capture_page(
         f"<title>{html.escape(title)}</title>"
         "<style>"
         ":root{--desk:#e4dccb;--ink:#1c1915;--paper:#fbf7ef;--fields:#efe8d8;"
-        "--rail:#d9d0bf;--mark:#e7b008;--bar:#243028;--bar-text:#f4efe4}"
-        "body{margin:0;background:var(--desk);color:var(--ink);font-family:Batang,serif}"
-        '#sections,.rows,button,select,input{font-family:"Malgun Gothic",sans-serif}'
-        "#sections{display:flex;gap:0.4rem;padding:0.4rem 1rem;background:var(--rail)}"
-        ".layout{display:grid;grid-template-columns:1fr 24rem;height:calc(100vh - 8rem)}"
-        "#filing{background:var(--paper);overflow:auto;height:100%}"
-        ".rows{background:var(--fields);overflow:auto;height:100%}"
+        "--rail:#d9d0bf;--mark:#e7b008;--bar:#243028;--bar-text:#f4efe4;--split:60%}"
+        "body{margin:0;height:100vh;display:flex;flex-direction:column;overflow:hidden;"
+        "background:var(--desk);color:var(--ink);font-family:Batang,serif}"
+        '#sections,.rows,button,select,input,a{font-family:"Malgun Gothic",sans-serif}'
+        "header{position:sticky;top:0;z-index:4;flex:none;background:var(--ink);"
+        "color:var(--bar-text)}"
+        "#sections{display:flex;gap:0.4rem;padding:0.4rem 1rem;background:var(--rail);flex:none}"
+        ".layout{display:flex;flex:1 1 auto;min-height:0;align-items:stretch}"
+        "#filing{flex:0 0 var(--split);min-width:12rem;max-width:calc(100% - 13rem);"
+        "background:var(--paper);overflow:auto;height:100%}"
+        "#pane-resizer{flex:0 0 0.5rem;cursor:col-resize;background:var(--rail);"
+        "touch-action:none}"
+        ".rows{flex:1 1 auto;min-width:12rem;background:var(--fields);overflow:auto;height:100%}"
         "section:not([data-active]){display:none}"
         "#confirm{display:flex;gap:0.5rem;align-items:center;padding:0.5rem 1rem;"
-        "background:var(--bar);color:var(--bar-text)}"
+        "background:var(--bar);color:var(--bar-text);flex:none}"
         "#confirm[hidden]{display:none}"
-        "header{background:var(--ink);color:var(--bar-text)}"
+        "#field-picker{position:fixed;z-index:8;background:var(--paper);color:var(--ink);"
+        "border:1px solid var(--ink);padding:0.5rem;max-width:18rem;max-height:70vh;"
+        "overflow:auto}"
+        "#field-picker[hidden]{display:none}"
+        "#field-picker button{display:block;width:100%;text-align:left;margin:0.15rem 0}"
         "</style></head><body>"
         f"{header}"
         f"{_sections_nav()}"
@@ -115,9 +129,11 @@ def render_capture_page(
         f"{_toc_nav(toc)}"
         '<div class="layout">'
         '<div id="filing"></div>'
+        '<div id="pane-resizer" role="separator" aria-orientation="vertical"></div>'
         f'<div class="rows">{row_column}</div>'
         "</div>"
-        f"{_data(capture_url, preview_url, cleaned)}"
+        '<div id="field-picker" hidden></div>'
+        f"{_data(capture_url, preview_url, export_url, f'{rcept_no}/{dcm_no}', cleaned)}"
         '<script src="/static/capture.js"></script>'
         "</body></html>"
     )
@@ -209,10 +225,10 @@ def _row_form(
 ) -> str:
     action = html.escape(capture_url, quote=True)
     lines = _list_lines(row, record)
-    shown = "" if lines is not None else _block(_saved_text(row, record))
+    shown = _saved_paragraph("" if lines is not None else _saved_text(row, record))
     miss = "<p>읽을 수 없습니다</p>" if missed else ""
     form = (
-        f'<form class="capture-row" method="post" action="{action}">'
+        f'<form class="capture-row" method="post" action="{action}"{_state_attrs(row, record)}>'
         f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
         f'<input type="hidden" name="bundle" value="{html.escape(row.bundle, quote=True)}">'
         f'<input type="hidden" name="subject" value="{html.escape(row.subject, quote=True)}">'
@@ -225,9 +241,10 @@ def _row_form(
         '<p class="row-error"></p>'
         "</form>"
     )
-    if not lines:
+    if (row.bundle, row.subject) not in _LIST_FIELDS:
         return form
-    return form + _remove_forms(row, lines, token, capture_url)
+    inner = _remove_forms(row, lines, token, capture_url) if lines else ""
+    return form + f'<div class="saved-lines">{inner}</div>'
 
 
 def _list_lines(row: CaptureRow, record: Any) -> list[str] | None:
@@ -328,10 +345,74 @@ def _plain(value: Any) -> str:
     return str(value)
 
 
-def _block(text: str) -> str:
-    if not text:
+def _saved_paragraph(text: str) -> str:
+    inner = "<br>".join(html.escape(line) for line in text.split("\n")) if text else ""
+    return f'<p class="saved-value">{inner}</p>'
+
+
+def _state_attrs(row: CaptureRow, record: Any) -> str:
+    if record is None:
         return ""
-    return "<p>" + "<br>".join(html.escape(line) for line in text.split("\n")) + "</p>"
+    status = str(record["status"])
+    evidence = str(record["evidence"] or "")
+    parts = [
+        ' data-filled="1"',
+        f' data-status="{html.escape(status, quote=True)}"',
+        f' data-evidence="{html.escape(evidence, quote=True)}"',
+    ]
+    replay = confirmed_replay(row.bundle, row.subject, record)
+    if replay is not None:
+        raw = json.dumps(replay, ensure_ascii=False)
+        parts.append(f' data-replay="{html.escape(raw, quote=True)}"')
+    return "".join(parts)
+
+
+def capture_feedback(bundle: str, subject: str, record: Any) -> dict[str, Any]:
+    """저장 직후 오른쪽 칸에 다시 그릴 값. 행이 없으면 빈 칸이다."""
+    if record is None:
+        return {
+            "shown": "",
+            "lines": None,
+            "replay": None,
+            "status": "",
+            "evidence": "",
+            "value": None,
+        }
+    row = next(
+        (item for item in capture_rows() if item.bundle == bundle and item.subject == subject),
+        None,
+    )
+    status = str(record["status"])
+    evidence = str(record["evidence"] or "")
+    if row is None:
+        return {
+            "shown": "",
+            "lines": None,
+            "replay": None,
+            "status": status,
+            "evidence": evidence,
+            "value": None,
+        }
+    lines = _list_lines(row, record)
+    shown = "" if lines is not None else _saved_text(row, record)
+    return {
+        "shown": shown,
+        "lines": lines,
+        "replay": confirmed_replay(bundle, subject, record),
+        "status": status,
+        "evidence": evidence,
+        "value": _found_json(record),
+    }
+
+
+def confirmed_replay(bundle: str, subject: str, record: Any) -> Any:
+    """같은 칸을 다시 POST 할 때 ``confirmed``로 보낼 값."""
+    if (bundle, subject) in _LIST_FIELDS:
+        return None
+    parsed = _found_json(record)
+    if money_group(bundle, subject) is not None and isinstance(parsed, dict):
+        return parsed.get("value")
+    return parsed
 
 
 def _hint(row: CaptureRow) -> str:
@@ -408,11 +489,19 @@ def _path(rcept_no: str, dcm_no: str, action: str, base: str = "doc") -> str:
     return f"/{base}/{quote(rcept_no)}/{quote(dcm_no)}/{action}"
 
 
-def _data(capture_url: str, preview_url: str, filing_html: str) -> str:
+def _data(
+    capture_url: str,
+    preview_url: str,
+    export_url: str,
+    doc_id: str,
+    filing_html: str,
+) -> str:
     payload = html_json(
         {
             "captureUrl": capture_url,
             "previewUrl": preview_url,
+            "exportUrl": export_url,
+            "docId": doc_id,
             "filingHtml": filing_html,
             "sections": {name: list(phrases) for name, phrases in section_jumps().items()},
         }
