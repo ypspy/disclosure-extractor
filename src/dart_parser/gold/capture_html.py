@@ -61,7 +61,16 @@ _DROP = frozenset(
         "math",
         "textarea",
         "select",
-        "title",
+        "applet",
+        "param",
+        "xmp",
+        "plaintext",
+        "noembed",
+        "noframes",
+        "video",
+        "audio",
+        "source",
+        "track",
         "head",
         "meta",
         "link",
@@ -72,7 +81,10 @@ _DROP = frozenset(
     }
 )
 _VOID = frozenset({"br", "hr", "col", "img"})
-_DROP_VOID = frozenset({"embed", "base", "meta", "link", "input", "frame"})
+_DROP_VOID = frozenset(
+    {"embed", "base", "meta", "link", "input", "frame", "param", "source", "track"}
+)
+_PASS = frozenset({"html", "body"})
 _HEADINGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 _ATTRS = frozenset(
     {"colspan", "rowspan", "align", "valign", "width", "height", "style", "class", "id"}
@@ -94,13 +106,15 @@ class _Clean(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         name = tag.lower()
+        if name in _PASS:
+            return
         if self._skip:
             if name in _DROP and name not in _DROP_VOID:
                 self._skip -= 1
             return
-        if name in _DROP or (name not in _KEEP and name != "a"):
+        if name in _DROP or name in _DROP_VOID:
             return
-        emit = "span" if name == "a" else name
+        emit = name if name in _KEEP else "span"
         if self._stack and self._stack[-1] == emit:
             self._stack.pop()
             self.parts.append(f"</{emit}>")
@@ -135,19 +149,23 @@ class _Clean(HTMLParser):
             if not close:
                 self._skip += 1
             return
+        if name in _PASS:
+            return
         if name == "img":
             src = _data_image_src(attrs)
             if src is None:
                 return
             self._emit("img", attrs, extra_src=src, void=True)
             return
-        if name not in _KEEP and name != "a":
-            return
-        emit = "span" if name == "a" else name
-        void = emit in _VOID or close
+        emit = name if name in _KEEP else "span"
+        void = emit in _VOID
         self._emit(emit, attrs, extra_src=None, void=void)
-        if not void:
-            self._stack.append(emit)
+        if void:
+            return
+        if close:
+            self.parts.append(f"</{emit}>")
+            return
+        self._stack.append(emit)
 
     def _emit(
         self,
@@ -188,7 +206,7 @@ def _data_image_src(attrs: list[tuple[str, str | None]]) -> str | None:
 
 
 def prepare_disclosure_html(page: str) -> str:
-    """허용된 태그만 남긴 공시 HTML."""
+    """스크립트를 빼고, 공시 태그는 클릭할 수 있는 요소로 남긴 HTML."""
     parser = _Clean()
     parser.feed(page)
     parser.close()
