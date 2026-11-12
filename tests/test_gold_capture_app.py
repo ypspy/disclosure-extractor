@@ -879,4 +879,8 @@ def test_capture_script_drags_and_confirms(tmp_path: Path) -> None:
     assert "confirmed" in script
     assert "event.target.textContent" not in script
     assert "fonts.googleapis.com" not in script
+    assert 'addEventListener("change"' in script
+    assert "켜진 칸이 없다" in script
+    assert "드래그 글자가 비어 있다" in script
+    assert "response.text()" in script.split("confirm-save", 1)[1]
     app.close()

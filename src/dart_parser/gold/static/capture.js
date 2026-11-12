@@ -14,9 +14,13 @@
   });
   root.addEventListener("pointerup", function () {
     var form = selectedRow();
+    if (!form) {
+      showRejection("켜진 칸이 없다");
+      return;
+    }
     var text = selectedText(root);
-    if (!form || !text.replace(/\s/g, "")) {
-      hideBar();
+    if (!text.replace(/\s/g, "")) {
+      showRejection("드래그 글자가 비어 있다");
       return;
     }
     var body = new URLSearchParams();
@@ -29,9 +33,15 @@
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: body
     }).then(function (response) {
-      return response.json().then(function (payload) {
-        if (!response.ok) {
-          showReason(payload.error || "읽을 수 없습니다.");
+      return response.text().then(function (raw) {
+        var payload = null;
+        try {
+          payload = JSON.parse(raw);
+        } catch (error) {
+          payload = null;
+        }
+        if (!response.ok || !payload || typeof payload !== "object") {
+          showRejection(previewFailureReason(payload, raw));
           return;
         }
         pending = {form: form, text: text, payload: payload};
@@ -58,10 +68,29 @@
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: body
     }).then(function (response) {
-      if (response.redirected || response.ok) window.location.assign(response.url);
+      if (response.redirected || response.ok) {
+        window.location.assign(response.url);
+        return;
+      }
+      response.text().then(function (raw) {
+        showReason(raw);
+        bar.hidden = false;
+      });
     });
   });
   document.getElementById("confirm-cancel").addEventListener("click", hideBar);
+
+  document.addEventListener("change", function (event) {
+    var input = event.target;
+    var form = input && input.form;
+    if (!form || !form.classList.contains("capture-row")) return;
+    if (input.name !== "row" || !input.checked) return;
+    var forms = document.querySelectorAll("form.capture-row");
+    for (var i = 0; i < forms.length; i++) {
+      if (forms[i] !== form && forms[i].row) forms[i].row.checked = false;
+    }
+    hideBar();
+  });
 
   document.getElementById("sections").addEventListener("click", function (event) {
     var button = event.target.closest("button[data-section]");
@@ -196,6 +225,16 @@
         return number;
       }
     return field.value;
+  }
+  function previewFailureReason(payload, raw) {
+    if (payload && payload.error) return payload.error;
+    if (raw === "재입수 중" || raw === "재입수가 끝났습니다") return raw;
+    return "읽을 수 없습니다.";
+  }
+  function showRejection(reason) {
+    pending = null;
+    showReason(reason);
+    bar.hidden = false;
   }
   function showReason(text) {
     document.getElementById("confirm-reason").textContent = text || "";
