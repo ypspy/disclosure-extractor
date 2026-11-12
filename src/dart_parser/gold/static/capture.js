@@ -20,11 +20,12 @@
   var autoKey = "gold-auto-advance";
   var storedAuto = sessionStorage.getItem(autoKey);
   var autoOn = storedAuto === null ? true : storedAuto === "1";
-  var mapKey = "gold-field-map:" + (data.docId || "");
-  var undoKey = "gold-undo:" + (data.docId || "");
+  var mapKey = "gold-field-map:" + (data.docId || "") + ":" + (data.pass || data.base || "");
+  var undoKey = "gold-undo:" + (data.docId || "") + ":" + (data.pass || data.base || "");
   var locatorMap = readJson(mapKey, {});
   var undoStack = readJson(undoKey, []);
   if (!Array.isArray(undoStack)) undoStack = [];
+  var undoBusy = false;
   var storedSplit = sessionStorage.getItem("gold-split");
   if (storedSplit && /^\d{1,2}%$/.test(storedSplit)) {
     document.documentElement.style.setProperty("--split", storedSplit);
@@ -488,7 +489,7 @@
     if (payload.proposal == null || payload.proposal === "") return undefined;
     return payload.proposal;
   }
-  function postCapture(form, text, value, method, locator, onRedirect, range, skipUndo) {
+  function postCapture(form, text, value, method, locator, onRedirect, range, skipUndo, onDone) {
     var before = readState(form);
     var body = new URLSearchParams();
     body.set("token", form.token.value);
@@ -514,8 +515,12 @@
             payload = null;
           }
           if (!response.ok || !payload || payload.ok === false) {
-            showReason((payload && payload.error) || "읽을 수 없습니다.");
-            bar.hidden = false;
+            var reason = (payload && payload.error) || "읽을 수 없습니다.";
+            if (onDone) onDone(false, reason);
+            else {
+              showReason(reason);
+              bar.hidden = false;
+            }
             return;
           }
           if (!skipUndo) pushUndo(form, before);
@@ -529,12 +534,20 @@
             var next = nextEmpty(form);
             if (next) arm(next);
           }
+          if (onDone) onDone(true);
+        });
+      }
+      if (onDone) {
+        return response.text().then(function (raw) {
+          onDone(false, raw || "읽을 수 없습니다.");
         });
       }
       if (onRedirect) onRedirect(response);
+    }).catch(function () {
+      if (onDone) onDone(false, "읽을 수 없습니다.");
     });
   }
-  function postStatus(form, status, skipUndo) {
+  function postStatus(form, status, skipUndo, onDone) {
     var before = readState(form);
     var body = new URLSearchParams();
     body.set("token", form.token.value);
@@ -551,6 +564,11 @@
     }).then(function (response) {
       var type = response.headers.get("Content-Type") || "";
       if (type.indexOf("application/json") === -1) {
+        if (onDone) {
+          return response.text().then(function (raw) {
+            onDone(false, raw || "읽을 수 없습니다.");
+          });
+        }
         redirectAfterCapture(response);
         return;
       }
@@ -561,14 +579,20 @@
         } catch (error) {
           payload = null;
         }
-        if (!response.ok || !payload || payload.ok === false) return;
+        if (!response.ok || !payload || payload.ok === false) {
+          if (onDone) onDone(false, (payload && payload.error) || "읽을 수 없습니다.");
+          return;
+        }
         if (!skipUndo) pushUndo(form, before);
         writeState(form, payload);
         if (status === "clear") forgetLocator(form);
+        if (onDone) onDone(true);
       });
+    }).catch(function () {
+      if (onDone) onDone(false, "읽을 수 없습니다.");
     });
   }
-  function postRemove(form, index, skipUndo) {
+  function postRemove(form, index, skipUndo, onDone) {
     var before = readState(form);
     var kind = form.bundle.value === "notes_toc" ? "remove_title" : "remove_item";
     var body = new URLSearchParams();
@@ -587,6 +611,11 @@
     }).then(function (response) {
       var type = response.headers.get("Content-Type") || "";
       if (type.indexOf("application/json") === -1) {
+        if (onDone) {
+          return response.text().then(function (raw) {
+            onDone(false, raw || "읽을 수 없습니다.");
+          });
+        }
         redirectAfterCapture(response);
         return;
       }
@@ -597,10 +626,16 @@
         } catch (error) {
           payload = null;
         }
-        if (!response.ok || !payload || payload.ok === false) return;
+        if (!response.ok || !payload || payload.ok === false) {
+          if (onDone) onDone(false, (payload && payload.error) || "읽을 수 없습니다.");
+          return;
+        }
         if (!skipUndo) pushUndo(form, before);
         writeState(form, payload);
+        if (onDone) onDone(true);
       });
+    }).catch(function () {
+      if (onDone) onDone(false, "읽을 수 없습니다.");
     });
   }
   function previewFailureReason(payload, raw) {
@@ -806,9 +841,35 @@
       replay: replay,
       shown: savedText(form),
       lines: readLines(form),
+      entries: readEntries(form),
       locator: saved ? saved.locator : null,
       method: saved ? saved.selection_method : null
     };
+  }
+  function readEntries(form) {
+    var raw = form.getAttribute("data-value");
+    if (!raw) return null;
+    var parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return null;
+    }
+    if (form.bundle.value === "notes_toc" && parsed && Array.isArray(parsed.titles)) {
+      return parsed.titles.map(function (title) { return String(title); });
+    }
+    if (form.bundle.value === "communications" && Array.isArray(parsed)) {
+      var entries = [];
+      for (var i = 0; i < parsed.length; i++) {
+        var item = parsed[i];
+        if (!item || typeof item !== "object") continue;
+        var entry = {raw: String(item.raw || "")};
+        if (item.date) entry.date = String(item.date);
+        entries.push(entry);
+      }
+      return entries;
+    }
+    return null;
   }
   function writeState(form, payload) {
     var progress = document.getElementById("doc-progress");
@@ -820,6 +881,7 @@
       form.removeAttribute("data-status");
       form.removeAttribute("data-evidence");
       form.removeAttribute("data-replay");
+      form.removeAttribute("data-value");
       setSavedValue(form, "");
       clearLines(form);
       return;
@@ -829,6 +891,10 @@
     form.setAttribute("data-evidence", payload.evidence || "");
     if (payload.replay === null || payload.replay === undefined) form.removeAttribute("data-replay");
     else form.setAttribute("data-replay", JSON.stringify(payload.replay));
+    if (isListField(form)) {
+      if (payload.value === null || payload.value === undefined) form.removeAttribute("data-value");
+      else form.setAttribute("data-value", JSON.stringify(payload.value));
+    }
     setSavedValue(form, payload.shown || "");
     if (payload.lines) renderLines(form, payload.lines);
     else clearLines(form);
@@ -905,46 +971,133 @@
     sessionStorage.setItem(undoKey, JSON.stringify(undoStack));
   }
   function undoLast() {
-    if (!undoStack.length) return;
-    var entry = undoStack.pop();
-    sessionStorage.setItem(undoKey, JSON.stringify(undoStack));
+    if (undoBusy || !undoStack.length) return;
+    var entry = undoStack[undoStack.length - 1];
     var form = findForm(entry.bundle, entry.subject);
     if (!form) return;
-    var before = entry.before;
+    undoBusy = true;
+    applyUndo(form, entry.before, function (ok, reason) {
+      undoBusy = false;
+      if (!ok) {
+        showReason(reason || "읽을 수 없습니다.");
+        bar.hidden = false;
+        return;
+      }
+      restoreLocator(form, entry.before);
+      commitUndo();
+    });
+  }
+  function applyUndo(form, before, done) {
     if (!before) {
-      restoreLocator(form, null);
-      postStatus(form, "clear", true);
+      postStatus(form, "clear", true, done);
       return;
     }
     if (before.status === "not_applicable" || before.status === "not_in_regime") {
-      restoreLocator(form, before);
-      postStatus(form, before.status, true);
+      postStatus(form, before.status, true, done);
+      return;
+    }
+    if (isListField(form) && before.status === "found") {
+      restoreList(form, before, done);
       return;
     }
     if (before.status === "found" && before.replay !== null && before.replay !== undefined) {
-      restoreLocator(form, before);
       postCapture(
         form,
         before.evidence || "",
         before.replay,
         before.method || "manual_edit",
         before.locator || null,
-        redirectAfterCapture,
         null,
-        true
+        null,
+        true,
+        done
       );
       return;
     }
-    var listField = (form.bundle.value === "notes_toc" && form.subject.value === "value")
+    postStatus(form, "clear", true, done);
+  }
+  function isListField(form) {
+    return (form.bundle.value === "notes_toc" && form.subject.value === "value")
       || (form.bundle.value === "communications" && form.subject.value === "items");
-    if (listField) {
-      var current = readLines(form) || [];
-      var previous = before.lines || [];
-      if (current.length === previous.length + 1) postRemove(form, current.length - 1, true);
+  }
+  function restoreList(form, before, done) {
+    var current = readLines(form) || [];
+    var previous = before.lines || [];
+    if (current.length === previous.length + 1 && listPrefix(previous, current)) {
+      postRemove(form, current.length - 1, true, done);
       return;
     }
-    restoreLocator(form, null);
-    postStatus(form, "clear", true);
+    replayList(form, before, done);
+  }
+  function listPrefix(previous, current) {
+    for (var i = 0; i < previous.length; i++) {
+      if (current[i] !== previous[i]) return false;
+    }
+    return true;
+  }
+  function replayList(form, before, done) {
+    var current = readLines(form) || [];
+    var steps = before.entries && before.entries.length ? before.entries : (before.lines || []);
+    if (!current.length) {
+      replayLines(form, before, steps, 0, done);
+      return;
+    }
+    postStatus(form, "clear", true, function (ok, reason) {
+      if (!ok) {
+        done(false, reason);
+        return;
+      }
+      replayLines(form, before, steps, 0, done);
+    });
+  }
+  function replayLines(form, before, steps, index, done) {
+    if (index >= steps.length) {
+      done(true);
+      return;
+    }
+    var step = steps[index];
+    postCapture(
+      form,
+      lineText(form, step),
+      lineConfirmed(form, step),
+      before.method || "manual_edit",
+      before.locator || null,
+      null,
+      null,
+      true,
+      function (ok, reason) {
+        if (!ok) {
+          done(false, reason);
+          return;
+        }
+        replayLines(form, before, steps, index + 1, done);
+      }
+    );
+  }
+  function lineText(form, step) {
+    if (step && typeof step === "object") return String(step.raw || "");
+    var text = String(step || "");
+    if (form.bundle.value === "communications") return communicationRaw(text);
+    return text;
+  }
+  function lineConfirmed(form, step) {
+    if (step && typeof step === "object") {
+      var item = {raw: String(step.raw || "")};
+      if (step.date) item.date = String(step.date);
+      return item;
+    }
+    if (form.bundle.value === "communications") return {raw: communicationRaw(step)};
+    return String(step || "");
+  }
+  function communicationRaw(line) {
+    var text = String(line || "");
+    var space = text.indexOf(" ");
+    if (space > 0 && /^\d+$/.test(text.slice(0, space))) return text.slice(space + 1);
+    return text;
+  }
+  function commitUndo() {
+    undoStack.pop();
+    sessionStorage.setItem(undoKey, JSON.stringify(undoStack));
   }
   function nextEmpty(from) {
     var forms = document.querySelectorAll("form.capture-row");

@@ -492,7 +492,7 @@ def _host_allowed(environ: dict[str, Any]) -> bool:
     host = str(environ.get("HTTP_HOST") or "")
     port = str(environ.get("SERVER_PORT") or "")
     allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    if port in {"80", ""}:
+    if port == "80":
         allowed.update({"127.0.0.1", "localhost"})
     return host in allowed
 

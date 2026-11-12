@@ -921,11 +921,12 @@ def _request_host(
     app: ReviewApplication,
     path: str,
     host: str,
+    port: str = "80",
 ) -> tuple[str, dict[str, str], bytes]:
     environ = {"PATH_INFO": path, "QUERY_STRING": "", "REQUEST_METHOD": "GET"}
     setup_testing_defaults(environ)
     environ["HTTP_HOST"] = host
-    environ["SERVER_PORT"] = "80"
+    environ["SERVER_PORT"] = port
     environ["wsgi.input"] = io.BytesIO()
     captured: dict[str, object] = {}
 
@@ -1119,4 +1120,99 @@ def test_json_accept_saves_in_place_and_still_requires_confirmed(tmp_path: Path)
     assert json.loads(rejected_body)["ok"] is False
     assert _capture(tmp_path, "auditor", "value") is None
     assert json.loads(_capture(tmp_path, "company_name", "value")["value"]) == "가나회사"
+    app.close()
+
+
+def _capture_json_data(page: str) -> dict[str, object]:
+    raw = page.split('id="capture-data"', 1)[1]
+    raw = raw.split(">", 1)[1].split("</script>", 1)[0]
+    loaded = json.loads(raw)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _js_function(script: str, name: str) -> str:
+    marker = f"function {name}"
+    start = script.index(marker)
+    rest = script[start + len(marker) :]
+    nxt = rest.find("\n  function ")
+    return rest if nxt < 0 else rest[:nxt]
+
+
+def test_document_capture_data_names_pass_one(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/doc/R100/D100")
+    assert status == "200 OK"
+    data = _capture_json_data(body.decode())
+    assert data["pass"] == 1
+    assert data["base"] == "doc"
+    app.close()
+
+
+def test_capture_script_scopes_storage_and_restores_lists_after_ok(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    status, _headers, body = _request(app, "GET", "/static/capture.js")
+    assert status == "200 OK"
+    script = body.decode()
+    assert 'var mapKey = "gold-field-map:" + (data.docId || "");' not in script
+    assert 'var undoKey = "gold-undo:" + (data.docId || "");' not in script
+    map_line = next(line for line in script.splitlines() if "gold-field-map:" in line)
+    undo_line = next(line for line in script.splitlines() if "gold-undo:" in line)
+    assert "data.docId" in map_line
+    assert "data.pass" in map_line or "data.base" in map_line
+    assert "data.docId" in undo_line
+    assert "data.pass" in undo_line or "data.base" in undo_line
+    undo = _js_function(script, "undoLast")
+    assert "undoStack.pop()" not in undo
+    assert "sessionStorage.setItem(undoKey" not in undo
+    assert "undoBusy" in undo
+    assert "commitUndo()" in undo
+    assert undo.index("if (!ok)") < undo.index("commitUndo()")
+    commit = _js_function(script, "commitUndo")
+    assert "undoStack.pop()" in commit
+    assert "undoKey" in commit
+    restore = _js_function(script, "restoreList")
+    assert "postRemove" in restore
+    assert "current.length - 1" in restore
+    assert "replayList" in restore
+    replay = _js_function(script, "replayLines")
+    assert "postCapture" in replay
+    assert "lineConfirmed" in replay
+    assert "postRemove(form, current.length - 1" not in replay
+    app.close()
+
+
+def test_portless_loopback_host_requires_server_port_80(tmp_path: Path) -> None:
+    app = _build(tmp_path)
+    saved = "호스트분리값"
+    _post(
+        app,
+        "/doc/R100/D100/capture",
+        {
+            "bundle": "company_name",
+            "subject": "value",
+            "text": saved,
+            "confirmed": json.dumps(saved),
+        },
+    )
+    for host in ("127.0.0.1", "localhost", "127.0.0.1:80", "localhost:80"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "80")
+        assert status == "200 OK", host
+        assert saved.encode() in body
+    for host in ("127.0.0.1", "localhost"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "8000")
+        assert status.startswith("403"), host
+        assert body == "요청을 거절했습니다.".encode()
+        assert saved.encode() not in body
+    for host in ("evil.test", "evil.test:80"):
+        status, _headers, body = _request_host(app, "/doc/R100/D100/export", host, "80")
+        assert status.startswith("403"), host
+        assert saved.encode() not in body
+    empty, _headers, empty_body = _request_host(app, "/doc/R100/D100/export", "127.0.0.1", "")
+    assert empty.startswith("403")
+    assert empty_body == "요청을 거절했습니다.".encode()
+    assert saved.encode() not in empty_body
+    bare_local, _headers, bare_body = _request_host(app, "/doc/R100/D100/export", "localhost", "")
+    assert bare_local.startswith("403")
+    assert saved.encode() not in bare_body
     app.close()

@@ -133,7 +133,7 @@ def render_capture_page(
         f'<div class="rows">{row_column}</div>'
         "</div>"
         '<div id="field-picker" hidden></div>'
-        f"{_data(capture_url, preview_url, export_url, f'{rcept_no}/{dcm_no}', cleaned)}"
+        f"{_data(capture_url, preview_url, export_url, f'{rcept_no}/{dcm_no}', cleaned, base)}"
         '<script src="/static/capture.js"></script>'
         "</body></html>"
     )
@@ -364,6 +364,11 @@ def _state_attrs(row: CaptureRow, record: Any) -> str:
     if replay is not None:
         raw = json.dumps(replay, ensure_ascii=False)
         parts.append(f' data-replay="{html.escape(raw, quote=True)}"')
+    if (row.bundle, row.subject) in _LIST_FIELDS:
+        parsed = _found_json(record)
+        if parsed is not None:
+            raw_value = json.dumps(parsed, ensure_ascii=False)
+            parts.append(f' data-value="{html.escape(raw_value, quote=True)}"')
     return "".join(parts)
 
 
@@ -495,6 +500,7 @@ def _data(
     export_url: str,
     doc_id: str,
     filing_html: str,
+    base: str,
 ) -> str:
     payload = html_json(
         {
@@ -502,6 +508,8 @@ def _data(
             "previewUrl": preview_url,
             "exportUrl": export_url,
             "docId": doc_id,
+            "pass": 1 if base == "doc" else 2,
+            "base": base,
             "filingHtml": filing_html,
             "sections": {name: list(phrases) for name, phrases in section_jumps().items()},
         }
