@@ -13,6 +13,9 @@
     var target = event.target;
     if (target && target.tagName === "A") event.preventDefault();
   });
+  root.addEventListener("submit", function (event) {
+    event.preventDefault();
+  });
   root.addEventListener("pointerup", function () {
     var form = selectedRow();
     if (!form) {
@@ -43,7 +46,11 @@
         } catch (error) {
           payload = null;
         }
-        if (!response.ok || !payload || typeof payload !== "object") {
+        if (!response.ok) {
+          showRejection(previewFailureReason(payload, raw));
+          return;
+        }
+        if (!payload || typeof payload !== "object") {
           showRejection(previewFailureReason(payload, raw));
           return;
         }
