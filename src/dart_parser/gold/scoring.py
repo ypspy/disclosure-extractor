@@ -462,21 +462,12 @@ def _cell_key(cell: dict[str, Any], key: str, old: str) -> Any:
 
 
 def _hours_keys(table: Any) -> tuple[Any, Any]:
-    """총 감사시간·투입 인원(당기, 합계)."""
-    audit = None
-    headcount = None
-    if not isinstance(table, list):
-        return (audit, headcount)
-    for cell in table:
-        if not isinstance(cell, dict):
-            continue
-        if cell.get("role") != "total" or cell.get("period") != "current":
-            continue
-        if cell.get("metric") == "audit":
-            audit = cell.get("value")
-        if cell.get("metric") == "headcount":
-            headcount = cell.get("value")
-    return (audit, headcount)
+    """labels 경로의 당기 합계. 입수 `_intake_hours_keys`와 같다.
+
+    HoursCell.model_dump()는 role·metric에 원문 라벨을 두고 role_key·metric_key에
+    total·audit_hours를 넣는다. period는 current 또는 prior다.
+    """
+    return _intake_hours_keys(table)
 
 
 def _answer_keys(gold_value: Any, old_table: Any) -> tuple[Any, Any]:

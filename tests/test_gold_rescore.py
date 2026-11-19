@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+from dart_parser.fallback.schemas import HoursCell
 from dart_parser.gold.db import migrate, open_gold
 from dart_parser.gold.scoring import rescore, table_carryover
 
@@ -42,7 +43,41 @@ def _hours(audit: int, headcount: int, extra: bool = False) -> list[dict[str, ob
     return rows
 
 
-def _prepare(tmp_path, *, old_hours, new_hours, scalar_new: str = "unqualified"):
+def _hours_cell(
+    role: str,
+    role_key: str,
+    metric: str,
+    metric_key: str,
+    value: float,
+) -> dict[str, object]:
+    """실제 추출기 스냅샷과 같은 HoursCell.model_dump()."""
+    dumped = HoursCell(
+        role=role,
+        role_key=role_key,
+        metric=metric,
+        metric_key=metric_key,
+        period="current",
+        value=value,
+    ).model_dump()
+    assert dumped["period"] == "current"
+    return dumped
+
+
+def _hours_cell_snapshot(audit: float, headcount: float) -> list[dict[str, object]]:
+    return [
+        _hours_cell("합계", "total", "감사시간", "audit_hours", audit),
+        _hours_cell("합계", "total", "투입인원", "headcount", headcount),
+    ]
+
+
+def _prepare(
+    tmp_path,
+    *,
+    old_hours,
+    new_hours,
+    scalar_new: str = "unqualified",
+    label_gold: dict[str, object] | None = None,
+):
     conn = open_gold(tmp_path / "gold.db", None)
     migrate(conn)
     now = datetime.now(UTC).isoformat()
@@ -90,7 +125,9 @@ def _prepare(tmp_path, *, old_hours, new_hours, scalar_new: str = "unqualified")
         """,
         (
             json.dumps(
-                {"verdict": "correct", "audit_hours": 100, "headcount": 5},
+                label_gold
+                if label_gold is not None
+                else {"verdict": "correct", "audit_hours": 100, "headcount": 5},
                 ensure_ascii=False,
             ),
             json.dumps(_hours(100, 5), ensure_ascii=False),
@@ -150,6 +187,34 @@ def test_hours_changed_but_key_match_queued(tmp_path) -> None:
     assert len(queued) == 1
     assert queued[0].bundle == "hours"
     assert _queue_count(conn) == 1
+
+
+def test_hours_cell_audit_only_change_does_not_carry_over(tmp_path) -> None:
+    """HoursCell 스냅샷에서 감사시간만 바뀌면 라벨을 이월하지 않는다."""
+    conn = _prepare(
+        tmp_path,
+        old_hours=_hours_cell_snapshot(100.0, 5.0),
+        new_hours=_hours_cell_snapshot(90.0, 5.0),
+        label_gold={"verdict": "correct"},
+    )
+    queued = table_carryover(conn, _OLD, _NEW)
+    assert queued == []
+    assert _queue_count(conn) == 0
+    assert _outcome(conn, _NEW, "hours") == "fp"
+
+
+def test_hours_cell_headcount_only_change_does_not_carry_over(tmp_path) -> None:
+    """HoursCell 스냅샷에서 인원만 바뀌면 라벨을 이월하지 않는다."""
+    conn = _prepare(
+        tmp_path,
+        old_hours=_hours_cell_snapshot(100.0, 5.0),
+        new_hours=_hours_cell_snapshot(100.0, 6.0),
+        label_gold={"verdict": "correct"},
+    )
+    queued = table_carryover(conn, _OLD, _NEW)
+    assert queued == []
+    assert _queue_count(conn) == 0
+    assert _outcome(conn, _NEW, "hours") == "fp"
 
 
 def test_scalar_rescored_without_human(tmp_path) -> None:
