@@ -26,7 +26,7 @@ disclosure-extractor(패키지 이름 `dart-hybrid-parser`, 모듈 `dart_parser`
 | `ypspy/review-kit` | PRIVATE | `main` | 독립 리뷰어(클라우드 에이전트) 규칙·스킬. 9절 참고 | [확인됨] `git ls-remote` main = `e124cd3893c4fb7cd56b20252ef37f9c4dbb509b` |
 | `ypspy/my-obsidian-vault` | PRIVATE | — | 리타이어한 이전 볼트. 삭제·아카이브는 윤석님 확인 필요 | [확인됨] 목록 / [추정] 상태는 `wiki/bot-operations.md` 2026-11-05 기록 |
 
-세 대상 저장소의 `handover` 브랜치(2026-11-25 KST): quality-updates `d269d795`(PR #189 열림, base `main`), dart-wrapper `48762aa6`(PR #22 열림, base `master`), disclosure-extractor `f700c39e`(PR #15 열림, base `feat/standard-extractors`). 셋 다 기본 브랜치를 일반 merge 커밋으로 받은 뒤(QU `399885b9`, DW `f7f4499`, DE `fd1561b`) DECISIONS.md 정리 커밋을 얹은 상태로, 기본 브랜치보다 뒤처진 커밋은 없다(앞선 커밋 QU 5, DW 4, DE 4). 11/24 초안의 `.gitignore`·`.env.example`·`HANDOVER.md`는 #187/#21/#14로 기본 브랜치에 들어갔다. 이 갱신본은 열린 PR과 섞이지 않게 `handover-update-20261125` 브랜치에서 올린다. [확인됨 11/25] `git rev-list --left-right --count`, `gh pr list`, `gh pr view`
+세 대상 저장소의 `handover` 브랜치(2026-11-25 KST): quality-updates `d269d795`(PR #189 열림, base `main`), dart-wrapper `48762aab`(PR #22 열림, base `master`), disclosure-extractor `f700c39e`(PR #15 열림, base `feat/standard-extractors`). 셋 다 기본 브랜치를 일반 merge 커밋으로 받은 뒤(QU `399885b9`, DW `f7f4499`, DE `fd1561b`) DECISIONS.md 정리 커밋을 얹은 상태로, 기본 브랜치보다 뒤처진 커밋은 없다(앞선 커밋 QU 5, DW 4, DE 4). 11/24 초안의 `.gitignore`·`.env.example`·`HANDOVER.md`는 #187/#21/#14로 기본 브랜치에 들어갔다. 이 갱신본은 열린 PR과 섞이지 않게 `handover-update-20261125` 브랜치에서 올린다. [확인됨 11/25] `git rev-list --left-right --count`, `gh pr list`, `gh pr view`
 
 ### 2.2 로컬 폴더 — LAPTOP-YS (Windows, 윤석님 노트북)
 
