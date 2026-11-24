@@ -26,3 +26,13 @@ gold*.db
 Thumbs.db
 .idea/
 .vscode/
+# handover 보강: 최소 비밀·로그·키, Node, 로컬 DB
+.env.*
+logs/
+*.log
+*.key
+*.pem
+node_modules/
+*.db
+*.db-wal
+*.db-shm
