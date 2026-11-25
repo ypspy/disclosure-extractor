@@ -6,10 +6,9 @@
 - 저장소: `ypspy/disclosure-extractor` (기본 브랜치 `feat/standard-extractors`)
 - 담당 봇: Mr. Zucchini
 - 출처: 봇 7개 대화 내보내기(`conversations-2026-11-23.zip`)에서 뽑은 원본 DECISIONS.md(340항목, `ypspy/quality-updates` `67fc396a`). 원본 zip과 압축 해제 파일은 저장소에 넣지 않았다.
-- 범위: 1절은 이 프로젝트로 분류 근거가 확실한 항목, 2절은 프로젝트와 무관하게 적용된다는 근거가 있는 공통 항목(세 저장소에 같은 내용), 3절은 1차 분류에서 「프로젝트 불명」이었던 64건 전부(세 저장소에 같은 내용).
-- 분류 근거 규칙: 항목마다 「프로젝트 분류」 줄에 근거(파일명, 봇 이름, 대화 맥락)를 적었다. 프로젝트 정의는 윤석님 결정(A=quality-updates, B=dart-wrapper, C=disclosure-extractor)을 따른다. 애매한 것은 임의로 정하지 않고 3절에 두었다.
-- 항목 본문·원문 인용·상태(번복 표시)는 원본 DECISIONS.md와 한 글자도 다르지 않다. 바뀐 것은 위치와, 항목 끝에 덧붙인 「프로젝트 분류」 줄(3절은 「추정 후보」 줄 포함)뿐이다.
-- 공통·미분류 항목은 `ypspy/quality-updates`의 COMMON_DECISIONS.md에도 있다(임시 위치).
+- 범위: 1절은 이 프로젝트로 분류 근거가 확실한 항목이다.
+- 분류 근거 규칙: 항목마다 「프로젝트 분류」 줄에 근거(파일명, 봇 이름, 대화 맥락)를 적었다. 프로젝트 정의는 윤석님 결정(A=quality-updates, B=dart-wrapper, C=disclosure-extractor)을 따른다.
+- 항목 본문·원문 인용·상태(번복 표시)는 원본 DECISIONS.md와 한 글자도 다르지 않다. 바뀐 것은 위치와, 항목 끝에 덧붙인 「프로젝트 분류」 줄뿐이다.
 
 ## 0. 작성 기준(원본 DECISIONS.md와 같음)
 
